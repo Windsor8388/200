@@ -1,0 +1,163 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && (request.auth.token.email_verified == true || request.auth.token.firebase.sign_in_provider == 'google.com');
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isOwner(ownerId) {
+      return isSignedIn() && request.auth.uid == ownerId;
+    }
+
+    // Helper: Valid User
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'email'])
+        && data.keys().hasOnly(['uid', 'email', 'displayName', 'photoURL', 'createdAt'])
+        && data.uid == request.auth.uid
+        && data.email is string && data.email.size() <= 256
+        && (!('displayName' in data) || (data.displayName is string && data.displayName.size() <= 128))
+        && (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 512))
+        && (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 64));
+    }
+
+    // Helper: Valid Agent
+    function isValidAgent(data) {
+      return data.keys().hasAll(['ownerId', 'name', 'pair', 'strategy', 'status'])
+        && data.keys().hasOnly(['id', 'ownerId', 'name', 'pair', 'strategy', 'timeframe', 'riskPercentage', 'status', 'totalTrades', 'winRate', 'pnl', 'model', 'createdAt', 'updatedAt'])
+        && data.ownerId == request.auth.uid
+        && data.name is string && data.name.size() > 0 && data.name.size() <= 64
+        && data.pair is string && data.pair.size() <= 20
+        && data.strategy is string && data.strategy.size() <= 64
+        && data.status in ['active', 'paused', 'stopped']
+        && (!('timeframe' in data) || (data.timeframe is string && data.timeframe.size() <= 10))
+        && (!('riskPercentage' in data) || data.riskPercentage is number)
+        && (!('totalTrades' in data) || data.totalTrades is number)
+        && (!('winRate' in data) || data.winRate is number)
+        && (!('pnl' in data) || data.pnl is number)
+        && (!('model' in data) || (data.model is string && data.model.size() <= 64));
+    }
+
+    // Helper: Valid Trade
+    function isValidTrade(data) {
+      return data.keys().hasAll(['ownerId', 'pair', 'side', 'entryPrice', 'status'])
+        && data.keys().hasOnly(['id', 'ownerId', 'agentId', 'pair', 'side', 'entryPrice', 'exitPrice', 'amount', 'leverage', 'stopLoss', 'takeProfit', 'pnl', 'pnlPercentage', 'status', 'source', 'createdAt'])
+        && data.ownerId == request.auth.uid
+        && data.pair is string && data.pair.size() <= 20
+        && data.side in ['BUY', 'SELL', 'LONG', 'SHORT']
+        && data.entryPrice is number
+        && data.status in ['OPEN', 'CLOSED', 'CANCELLED']
+        && (!('agentId' in data) || (data.agentId is string && data.agentId.size() <= 64))
+        && (!('exitPrice' in data) || data.exitPrice is number)
+        && (!('amount' in data) || data.amount is number)
+        && (!('leverage' in data) || data.leverage is number)
+        && (!('stopLoss' in data) || data.stopLoss is number)
+        && (!('takeProfit' in data) || data.takeProfit is number)
+        && (!('pnl' in data) || data.pnl is number)
+        && (!('pnlPercentage' in data) || data.pnlPercentage is number)
+        && (!('source' in data) || (data.source is string && data.source.size() <= 32));
+    }
+
+    // Helper: Valid Analysis
+    function isValidAnalysis(data) {
+      return data.keys().hasAll(['ownerId', 'pair', 'sentiment', 'summary'])
+        && data.keys().hasOnly(['id', 'ownerId', 'pair', 'timeframe', 'sentiment', 'confidence', 'recommendation', 'summary', 'indicators', 'createdAt'])
+        && data.ownerId == request.auth.uid
+        && data.pair is string && data.pair.size() <= 20
+        && data.sentiment is string && data.sentiment.size() <= 20
+        && data.summary is string && data.summary.size() <= 5000
+        && (!('timeframe' in data) || (data.timeframe is string && data.timeframe.size() <= 10))
+        && (!('confidence' in data) || data.confidence is number)
+        && (!('recommendation' in data) || (data.recommendation is string && data.recommendation.size() <= 32))
+        && (!('indicators' in data) || (data.indicators is string && data.indicators.size() <= 2000));
+    }
+
+    // Helper: Valid Setting
+    function isValidSetting(data) {
+      return data.keys().hasAll(['ownerId'])
+        && data.keys().hasOnly(['ownerId', 'emailNotifications', 'alertEmail', 'bingxApiKey', 'bingxSecretKey', 'isTestnet', 'updatedAt'])
+        && data.ownerId == request.auth.uid
+        && (!('emailNotifications' in data) || data.emailNotifications is bool)
+        && (!('alertEmail' in data) || (data.alertEmail is string && data.alertEmail.size() <= 256))
+        && (!('bingxApiKey' in data) || (data.bingxApiKey is string && data.bingxApiKey.size() <= 128))
+        && (!('bingxSecretKey' in data) || (data.bingxSecretKey is string && data.bingxSecretKey.size() <= 128))
+        && (!('isTestnet' in data) || data.isTestnet is bool);
+    }
+
+    // Users Collection
+    match /users/{userId} {
+      allow get: if isOwner(userId);
+      allow list: if false; // No blanket user listing
+      allow create: if isOwner(userId) && isValidUser(incoming());
+      allow update: if isOwner(userId) && isValidUser(incoming())
+        && incoming().uid == existing().uid;
+      allow delete: if isOwner(userId);
+    }
+
+    // Agents Collection
+    match /agents/{agentId} {
+      allow get: if isSignedIn() && existing().ownerId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.ownerId == request.auth.uid;
+      allow create: if isVerified() && isValidId(agentId) && isValidAgent(incoming());
+      allow update: if isVerified() && isValidId(agentId) && existing().ownerId == request.auth.uid
+        && isValidAgent(incoming())
+        && incoming().ownerId == existing().ownerId
+        && (!('createdAt' in existing()) || incoming().createdAt == existing().createdAt);
+      allow delete: if isVerified() && isValidId(agentId) && existing().ownerId == request.auth.uid;
+    }
+
+    // Trades Collection
+    match /trades/{tradeId} {
+      allow get: if isSignedIn() && existing().ownerId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.ownerId == request.auth.uid;
+      allow create: if isVerified() && isValidId(tradeId) && isValidTrade(incoming());
+      allow update: if isVerified() && isValidId(tradeId) && existing().ownerId == request.auth.uid
+        && isValidTrade(incoming())
+        && incoming().ownerId == existing().ownerId
+        && (!('createdAt' in existing()) || incoming().createdAt == existing().createdAt);
+      allow delete: if isVerified() && isValidId(tradeId) && existing().ownerId == request.auth.uid;
+    }
+
+    // Analyses Collection
+    match /analyses/{analysisId} {
+      allow get: if isSignedIn() && existing().ownerId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.ownerId == request.auth.uid;
+      allow create: if isVerified() && isValidId(analysisId) && isValidAnalysis(incoming());
+      allow update: if isVerified() && isValidId(analysisId) && existing().ownerId == request.auth.uid
+        && isValidAnalysis(incoming())
+        && incoming().ownerId == existing().ownerId;
+      allow delete: if isVerified() && isValidId(analysisId) && existing().ownerId == request.auth.uid;
+    }
+
+    // Settings Collection
+    match /settings/{settingId} {
+      allow get: if isOwner(settingId);
+      allow list: if false;
+      allow create: if isOwner(settingId) && isValidSetting(incoming());
+      allow update: if isOwner(settingId) && isValidSetting(incoming())
+        && incoming().ownerId == existing().ownerId;
+      allow delete: if isOwner(settingId);
+    }
+  }
+}

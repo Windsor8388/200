@@ -1,0 +1,7 @@
+{
+  "name": "BingX AI Trading Agents & Chart Analyzer",
+  "description": "منصة التداول الآلي والوكلاء الأذكياء لتحليل الشارت وإشارات BingX وحساب الأرباح باستخدام نماذج Gemini",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+

@@ -1,0 +1,118 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile representation",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "email": { "type": "string", "maxLength": 256 },
+        "displayName": { "type": "string", "maxLength": 128 },
+        "photoURL": { "type": "string", "maxLength": 512 },
+        "createdAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["uid", "email"]
+    },
+    "Agent": {
+      "title": "Agent",
+      "description": "Autonomous AI trading agent configuration",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 64 },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "maxLength": 64 },
+        "pair": { "type": "string", "maxLength": 20 },
+        "strategy": { "type": "string", "maxLength": 64 },
+        "timeframe": { "type": "string", "maxLength": 10 },
+        "riskPercentage": { "type": "number" },
+        "status": { "type": "string", "enum": ["active", "paused", "stopped"] },
+        "totalTrades": { "type": "number" },
+        "winRate": { "type": "number" },
+        "pnl": { "type": "number" },
+        "model": { "type": "string", "maxLength": 64 },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["ownerId", "name", "pair", "strategy", "status"]
+    },
+    "Trade": {
+      "title": "Trade",
+      "description": "Trading order and historical log",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 64 },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "agentId": { "type": "string", "maxLength": 64 },
+        "pair": { "type": "string", "maxLength": 20 },
+        "side": { "type": "string", "enum": ["BUY", "SELL", "LONG", "SHORT"] },
+        "entryPrice": { "type": "number" },
+        "exitPrice": { "type": "number" },
+        "amount": { "type": "number" },
+        "leverage": { "type": "number" },
+        "stopLoss": { "type": "number" },
+        "takeProfit": { "type": "number" },
+        "pnl": { "type": "number" },
+        "pnlPercentage": { "type": "number" },
+        "status": { "type": "string", "enum": ["OPEN", "CLOSED", "CANCELLED"] },
+        "source": { "type": "string", "maxLength": 32 },
+        "createdAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["ownerId", "pair", "side", "entryPrice", "status"]
+    },
+    "Analysis": {
+      "title": "Analysis",
+      "description": "Gemini AI technical chart analysis report",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 64 },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "pair": { "type": "string", "maxLength": 20 },
+        "timeframe": { "type": "string", "maxLength": 10 },
+        "sentiment": { "type": "string", "maxLength": 20 },
+        "confidence": { "type": "number" },
+        "recommendation": { "type": "string", "maxLength": 32 },
+        "summary": { "type": "string", "maxLength": 5000 },
+        "indicators": { "type": "string", "maxLength": 2000 },
+        "createdAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["ownerId", "pair", "sentiment", "summary"]
+    },
+    "Setting": {
+      "title": "Setting",
+      "description": "User preferences and BingX API state",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "emailNotifications": { "type": "boolean" },
+        "alertEmail": { "type": "string", "maxLength": 256 },
+        "bingxApiKey": { "type": "string", "maxLength": 128 },
+        "bingxSecretKey": { "type": "string", "maxLength": 128 },
+        "isTestnet": { "type": "boolean" },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["ownerId"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "User profile document owned by the authenticated user"
+    },
+    "/agents/{agentId}": {
+      "schema": { "$ref": "#/entities/Agent" },
+      "description": "Trading agents configured and managed by the user"
+    },
+    "/trades/{tradeId}": {
+      "schema": { "$ref": "#/entities/Trade" },
+      "description": "Auto-trading log and executions"
+    },
+    "/analyses/{analysisId}": {
+      "schema": { "$ref": "#/entities/Analysis" },
+      "description": "Technical chart analysis history"
+    },
+    "/settings/{settingId}": {
+      "schema": { "$ref": "#/entities/Setting" },
+      "description": "User integration and notification settings"
+    }
+  }
+}
