@@ -193,8 +193,8 @@ export const MonthlyComparisonChart: React.FC<MonthlyComparisonChartProps> = ({ 
 
           <div className="flex items-center justify-between">
             <span className="text-slate-400">صافي الأرباح:</span>
-            <span className={`font-mono font-bold ${data.netPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-              {data.netPnl >= 0 ? `+$${data.netPnl.toLocaleString()}` : `-$${Math.abs(data.netPnl).toLocaleString()}`}
+            <span className={`font-mono font-bold ${(data.netPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+              {(data.netPnl ?? 0) >= 0 ? `+$${(data.netPnl ?? 0).toLocaleString()}` : `-$${Math.abs(data.netPnl ?? 0).toLocaleString()}`}
             </span>
           </div>
 
@@ -284,25 +284,25 @@ export const MonthlyComparisonChart: React.FC<MonthlyComparisonChartProps> = ({ 
             <div>
               <div className="flex items-baseline justify-between gap-2">
                 <span className="text-xl font-bold font-mono text-emerald-400">
-                  +${currentMonth.netPnl.toLocaleString()}
+                  +${(currentMonth?.netPnl ?? 0).toLocaleString()}
                 </span>
                 <span
                   className={`text-xs font-bold px-2 py-0.5 rounded flex items-center gap-0.5 ${
-                    deltas.pnlDiff >= 0
+                    (deltas.pnlDiff ?? 0) >= 0
                       ? 'bg-emerald-950/80 border border-emerald-800 text-emerald-300'
                       : 'bg-rose-950/80 border border-rose-800 text-rose-300'
                   }`}
                 >
-                  {deltas.pnlDiff >= 0 ? <ArrowUpRight className="w-3 h-3" /> : <ArrowDownRight className="w-3 h-3" />}
-                  <span>{deltas.pnlPercent >= 0 ? '+' : ''}{deltas.pnlPercent}%</span>
+                  {(deltas.pnlDiff ?? 0) >= 0 ? <ArrowUpRight className="w-3 h-3" /> : <ArrowDownRight className="w-3 h-3" />}
+                  <span>{(deltas.pnlPercent ?? 0) >= 0 ? '+' : ''}{deltas.pnlPercent ?? 0}%</span>
                 </span>
               </div>
 
               <div className="text-[11px] text-slate-400 flex items-center justify-between mt-1 pt-1 border-t border-slate-850">
                 <span>{selectedPrevMonth.label}:</span>
-                <span className="font-mono text-slate-300">+${selectedPrevMonth.netPnl.toLocaleString()}</span>
+                <span className="font-mono text-slate-300">+${(selectedPrevMonth?.netPnl ?? 0).toLocaleString()}</span>
                 <span className="font-mono text-emerald-400">
-                  (فارق {deltas.pnlDiff >= 0 ? '+' : ''}${deltas.pnlDiff.toLocaleString()})
+                  (فارق {(deltas.pnlDiff ?? 0) >= 0 ? '+' : ''}${Math.abs(deltas.pnlDiff ?? 0).toLocaleString()})
                 </span>
               </div>
             </div>
@@ -556,7 +556,7 @@ export const MonthlyComparisonChart: React.FC<MonthlyComparisonChartProps> = ({ 
               />
               <Tooltip
                 formatter={(value: any, name: any) => [
-                  `$${Number(value).toLocaleString()}`,
+                  `$${(Number(value) || 0).toLocaleString()}`,
                   name === 'current' ? `الشهر الحالي (${currentMonth?.period})` : `الشهر المقارن (${selectedPrevMonth?.period})`,
                 ]}
                 contentStyle={{ backgroundColor: '#090d16', borderColor: '#334155', borderRadius: '8px' }}

@@ -13,9 +13,21 @@ function serverApiPlugin(): Plugin {
           try {
             const handled = await handleApiRequest(req, res);
             if (handled) return;
-          } catch (e) {
+          } catch (e: any) {
             console.error('API middleware error:', e);
+            if (!res.headersSent && !res.writableEnded) {
+              res.statusCode = 500;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ success: false, error: e?.message || 'API middleware error' }));
+            }
+            return;
           }
+          if (!res.headersSent && !res.writableEnded) {
+            res.statusCode = 404;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ success: false, error: 'Endpoint Not Found' }));
+          }
+          return;
         }
         next();
       });
@@ -26,9 +38,21 @@ function serverApiPlugin(): Plugin {
           try {
             const handled = await handleApiRequest(req, res);
             if (handled) return;
-          } catch (e) {
+          } catch (e: any) {
             console.error('API preview middleware error:', e);
+            if (!res.headersSent && !res.writableEnded) {
+              res.statusCode = 500;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ success: false, error: e?.message || 'API preview middleware error' }));
+            }
+            return;
           }
+          if (!res.headersSent && !res.writableEnded) {
+            res.statusCode = 404;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ success: false, error: 'Endpoint Not Found' }));
+          }
+          return;
         }
         next();
       });

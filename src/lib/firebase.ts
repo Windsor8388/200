@@ -8,6 +8,7 @@ import {
   type User,
 } from 'firebase/auth';
 import {
+  initializeFirestore,
   getFirestore,
   doc,
   getDocFromServer,
@@ -24,10 +25,11 @@ import firebaseConfig from '../../firebase-applet-config.json';
 
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
-// Note: Use firestoreDatabaseId if specified, or default instance
-export const db = (firebaseConfig as any).firestoreDatabaseId
-  ? getFirestore(app, (firebaseConfig as any).firestoreDatabaseId)
-  : getFirestore(app);
+// Note: Initialize Firestore with experimentalAutoDetectLongPolling to prevent iframe connection timeouts and 'code=unavailable' errors
+const dbId = (firebaseConfig as any).firestoreDatabaseId;
+export const db = dbId
+  ? initializeFirestore(app, { experimentalAutoDetectLongPolling: true }, dbId)
+  : initializeFirestore(app, { experimentalAutoDetectLongPolling: true });
 export const auth = getAuth(app);
 
 // Workspace Scopes for Gmail
@@ -41,23 +43,47 @@ SCOPES.forEach(scope => googleProvider.addScope(scope));
 
 // In-memory access token cache (CRITICAL: Do not store in localStorage)
 let cachedAccessToken: string | null = null;
-let isSigningIn = false;
+let activeSignInPromise: Promise<{ user: User; accessToken: string | null } | null> | null = null;
 
 export const getCachedAccessToken = () => cachedAccessToken;
 
 export async function signInWithGoogle(): Promise<{ user: User; accessToken: string | null } | null> {
-  try {
-    isSigningIn = true;
-    const result = await signInWithPopup(auth, googleProvider);
-    const credential = GoogleAuthProvider.credentialFromResult(result);
-    cachedAccessToken = credential?.accessToken || null;
-    return { user: result.user, accessToken: cachedAccessToken };
-  } catch (error) {
-    console.error('Google Sign-In failed:', error);
-    throw error;
-  } finally {
-    isSigningIn = false;
+  // If a popup request is already in progress, return the active promise to prevent cancelling it
+  if (activeSignInPromise) {
+    return activeSignInPromise;
   }
+
+  activeSignInPromise = (async () => {
+    try {
+      const result = await signInWithPopup(auth, googleProvider);
+      const credential = GoogleAuthProvider.credentialFromResult(result);
+      cachedAccessToken = credential?.accessToken || null;
+      return { user: result.user, accessToken: cachedAccessToken };
+    } catch (error: any) {
+      const errorCode = error?.code || '';
+      const errorMsg = error?.message || '';
+
+      // Gracefully handle cancellation, closed popup, or superseded popup requests without uncaught errors
+      if (
+        errorCode === 'auth/cancelled-popup-request' ||
+        errorCode === 'auth/popup-closed-by-user' ||
+        errorCode === 'auth/popup-blocked' ||
+        errorMsg.includes('auth/cancelled-popup-request') ||
+        errorMsg.includes('auth/popup-closed-by-user') ||
+        errorMsg.includes('auth/popup-blocked')
+      ) {
+        console.warn('Google Sign-In popup was cancelled, closed by user, or superseded.');
+        return null;
+      }
+
+      console.error('Google Sign-In failed:', error);
+      throw error;
+    } finally {
+      activeSignInPromise = null;
+    }
+  })();
+
+  return activeSignInPromise;
 }
 
 export async function logOut(): Promise<void> {
@@ -83,9 +109,14 @@ export function subscribeToAuth(
 export async function testConnection(): Promise<void> {
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.warn('Firebase client is offline, check connection.');
+  } catch (error: any) {
+    if (
+      (error instanceof Error && error.message.includes('the client is offline')) ||
+      error?.code === 'unavailable' ||
+      error?.code === 'failed-precondition' ||
+      error?.message?.includes('unavailable')
+    ) {
+      console.warn('Firebase client is offline or backend temporarily unreachable. Local cache active.');
     }
   }
 }

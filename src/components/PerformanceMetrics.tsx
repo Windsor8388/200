@@ -18,6 +18,8 @@ import {
   XCircle,
   HelpCircle,
   SlidersHorizontal,
+  Scale,
+  Flame,
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -36,11 +38,15 @@ import {
   PieChart,
   Pie,
 } from 'recharts';
-import type { TradeRecord } from '../lib/firestoreService.ts';
+import type { TradeRecord, TradingAgent } from '../lib/firestoreService.ts';
 import { MonthlyComparisonChart } from './MonthlyComparisonChart.tsx';
+import { AssetComparisonPanel } from './AssetComparisonPanel.tsx';
+import { AgentHeatmap } from './AgentHeatmap.tsx';
 
 interface PerformanceMetricsProps {
   trades: TradeRecord[];
+  agents?: TradingAgent[];
+  onSelectPair?: (pair: string) => void;
 }
 
 // Historical seed baseline so new users and demo sessions show full weekly/monthly curves
@@ -64,9 +70,10 @@ const HISTORICAL_MONTHLY_BASELINE = [
   { period: 'سبتمبر الحالي', label: 'سبتمبر 2026', netPnl: 2226.3, winRate: 82.2, tradesCount: 50, wins: 41, losses: 9, avgDurationMinutes: 37, grossProfit: 2705.0, grossLoss: 478.7, cumulativePnl: 12218.5 },
 ];
 
-export const PerformanceMetrics: React.FC<PerformanceMetricsProps> = ({ trades }) => {
-  const [timeframeView, setTimeframeView] = useState<'weekly' | 'monthly' | 'cumulative' | 'comparative'>('comparative');
+export const PerformanceMetrics: React.FC<PerformanceMetricsProps> = ({ trades, agents = [], onSelectPair }) => {
+  const [timeframeView, setTimeframeView] = useState<'weekly' | 'monthly' | 'cumulative' | 'comparative' | 'heatmap'>('comparative');
   const [selectedPairFilter, setSelectedPairFilter] = useState<string>('ALL');
+  const [showAssetComparison, setShowAssetComparison] = useState<boolean>(true);
 
   // Helper to format minutes into readable Arabic duration
   const formatDuration = (totalMinutes: number): string => {
@@ -148,6 +155,7 @@ export const PerformanceMetrics: React.FC<PerformanceMetricsProps> = ({ trades }
     const pairMap: Record<string, { pnl: number; count: number; wins: number }> = {};
     // Add default pairs
     pairMap['BTC-USDT'] = { pnl: 2850.5, count: 42, wins: 35 };
+    pairMap['XAU-USDT'] = { pnl: 3420.0, count: 38, wins: 32 };
     pairMap['ETH-USDT'] = { pnl: 1480.2, count: 28, wins: 22 };
     pairMap['SOL-USDT'] = { pnl: 960.8, count: 19, wins: 15 };
     pairMap['XRP-USDT'] = { pnl: 410.0, count: 12, wins: 9 };
@@ -235,8 +243,8 @@ export const PerformanceMetrics: React.FC<PerformanceMetricsProps> = ({ trades }
 
           <div className="flex items-center justify-between">
             <span className="text-slate-400">صافي الأرباح (Net PnL):</span>
-            <span className={`font-mono font-bold ${data.netPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-              {data.netPnl >= 0 ? `+$${data.netPnl.toLocaleString()}` : `-$${Math.abs(data.netPnl).toLocaleString()}`}
+            <span className={`font-mono font-bold ${(data.netPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+              {(data.netPnl ?? 0) >= 0 ? `+$${(data.netPnl ?? 0).toLocaleString()}` : `-$${Math.abs(data.netPnl ?? 0).toLocaleString()}`}
             </span>
           </div>
 
@@ -253,7 +261,7 @@ export const PerformanceMetrics: React.FC<PerformanceMetricsProps> = ({ trades }
           {data.cumulativePnl !== undefined && (
             <div className="flex items-center justify-between border-t border-slate-850 pt-1 text-[11px]">
               <span className="text-slate-400">الرصيد التراكمي:</span>
-              <span className="font-mono font-bold text-amber-300">${data.cumulativePnl.toLocaleString()}</span>
+              <span className="font-mono font-bold text-amber-300">${(data.cumulativePnl ?? 0).toLocaleString()}</span>
             </div>
           )}
         </div>
@@ -344,8 +352,46 @@ export const PerformanceMetrics: React.FC<PerformanceMetricsProps> = ({ trades }
             <BarChart3 className="w-3.5 h-3.5 text-emerald-400" />
             <span>مقارنة الشهور (Comparative Bar Chart)</span>
           </button>
+
+          <button
+            id="perf-tab-heatmap"
+            onClick={() => setTimeframeView('heatmap')}
+            className={`px-3 py-1.5 rounded-lg font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
+              timeframeView === 'heatmap'
+                ? 'bg-gradient-to-r from-amber-600 via-orange-600 to-rose-600 text-white shadow-sm font-bold ring-1 ring-amber-400/50'
+                : 'text-amber-400/80 hover:text-amber-300 hover:bg-slate-900'
+            }`}
+          >
+            <Flame className="w-3.5 h-3.5 text-amber-400" />
+            <span>خريطة حرارة الوكلاء (Agent Heatmap) 🔥</span>
+          </button>
         </div>
+
+        {/* Dual Asset Comparison Toggle Button */}
+        <button
+          id="btn-toggle-asset-duel"
+          type="button"
+          onClick={() => setShowAssetComparison(!showAssetComparison)}
+          className={`px-3.5 py-1.5 rounded-xl font-bold text-xs transition-all cursor-pointer flex items-center gap-2 border shadow-sm ${
+            showAssetComparison
+              ? 'bg-amber-500/20 text-amber-300 border-amber-500 ring-1 ring-amber-500/40'
+              : 'bg-slate-950 border-slate-750 text-slate-300 hover:text-white hover:border-amber-500/60'
+          }`}
+        >
+          <Scale className="w-4 h-4 text-amber-400" />
+          <span>{showAssetComparison ? 'إخفاء مقارنة الأصلين ✕' : 'مقارنة أداء أصلين (Asset Duel) ⚔️'}</span>
+        </button>
       </div>
+
+      {/* Asset Comparison Side Panel / Duel Section */}
+      {showAssetComparison && (
+        <AssetComparisonPanel
+          isOpen={showAssetComparison}
+          onClose={() => setShowAssetComparison(false)}
+          trades={trades}
+          agents={agents}
+        />
+      )}
 
       {/* 4 Core KPI Highlights */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
@@ -359,8 +405,8 @@ export const PerformanceMetrics: React.FC<PerformanceMetricsProps> = ({ trades }
           </div>
           <div>
             <div className="flex items-baseline gap-2">
-              <span className={`text-2xl font-bold font-mono ${totalNetPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                {totalNetPnl >= 0 ? `+$${totalNetPnl.toLocaleString(undefined, { minimumFractionDigits: 1 })}` : `-$${Math.abs(totalNetPnl).toLocaleString(undefined, { minimumFractionDigits: 1 })}`}
+              <span className={`text-2xl font-bold font-mono ${(totalNetPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                {(totalNetPnl ?? 0) >= 0 ? `+$${(totalNetPnl ?? 0).toLocaleString(undefined, { minimumFractionDigits: 1 })}` : `-$${Math.abs(totalNetPnl ?? 0).toLocaleString(undefined, { minimumFractionDigits: 1 })}`}
               </span>
               <span className="text-xs text-emerald-400 font-semibold bg-emerald-950/60 px-1.5 py-0.5 rounded border border-emerald-900 flex items-center">
                 <ArrowUpRight className="w-3 h-3" />
@@ -440,8 +486,10 @@ export const PerformanceMetrics: React.FC<PerformanceMetricsProps> = ({ trades }
         </div>
       </div>
 
-      {/* Primary Chart Area or Comparative Monthly Chart */}
-      {timeframeView === 'comparative' ? (
+      {/* Primary Chart Area or Comparative Monthly Chart or Agent Heatmap */}
+      {timeframeView === 'heatmap' ? (
+        <AgentHeatmap trades={trades} agents={agents} onSelectPair={onSelectPair} />
+      ) : timeframeView === 'comparative' ? (
         <MonthlyComparisonChart monthlyData={monthlyData} />
       ) : (
         <>
@@ -674,7 +722,7 @@ export const PerformanceMetrics: React.FC<PerformanceMetricsProps> = ({ trades }
 
                   <div className="text-right">
                     <span className="font-mono font-bold text-emerald-400 text-xs block">
-                      +${p.pnl.toLocaleString()}
+                      +${(p.pnl ?? 0).toLocaleString()}
                     </span>
                     <span className="text-[10px] text-cyan-300 font-mono">
                       فوز {p.winRate}%
@@ -694,6 +742,11 @@ export const PerformanceMetrics: React.FC<PerformanceMetricsProps> = ({ trades }
           </div>
         </div>
       </div>
+
+      {/* Embedded Agent Heatmap Matrix when not in dedicated heatmap tab */}
+      {timeframeView !== 'heatmap' && (
+        <AgentHeatmap trades={trades} agents={agents} onSelectPair={onSelectPair} />
+      )}
     </div>
   );
 };

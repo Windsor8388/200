@@ -43,6 +43,9 @@ export interface TradingAgent {
   winRate: number;
   pnl: number;
   model: string;
+  minConfidenceScore?: number;
+  executionMode?: 'AUTO_BINGX' | 'LIVE_FUTURES' | 'DEMO_VST';
+  patternTriggers?: string[];
   riskParameters?: BotRiskParameters;
   adaptation?: {
     marketRegime: string;
@@ -75,6 +78,11 @@ export interface TradeRecord {
   createdAt: string;
   closedAt?: string;
   durationMinutes?: number;
+  positionId?: string;
+  isLivePosition?: boolean;
+  contractQuantity?: number;
+  liquidationPrice?: number;
+  markPrice?: number;
 }
 
 export interface ChartAnalysisRecord {
@@ -97,6 +105,18 @@ export interface UserSettings {
   bingxApiKey?: string;
   bingxSecretKey?: string;
   isTestnet: boolean;
+  liveTradingConfirmed?: boolean;
+  riskLimits?: {
+    maxLeverage: number;
+    maxRiskPerTrade: number;
+    maxDailyLossUsdt: number;
+    stopLossRequired: boolean;
+    takeProfitRequired: boolean;
+  };
+  theme?: 'slate' | 'midnight-blue';
+  bytezApiKey?: string;
+  selectedAiProvider?: 'gemini' | 'bytez' | 'hybrid';
+  bytezModel?: string;
   updatedAt: string;
 }
 
@@ -189,6 +209,15 @@ export async function closeTrade(tradeId: string, exitPrice: number, finalPnl: n
   }
 }
 
+export async function updateTrade(tradeId: string, partial: Partial<TradeRecord>): Promise<void> {
+  const path = 'trades';
+  try {
+    await updateDoc(doc(db, path, tradeId), partial);
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, `${path}/${tradeId}`);
+  }
+}
+
 export function subscribeToTrades(
   ownerId: string,
   onUpdate: (trades: TradeRecord[]) => void
@@ -246,8 +275,15 @@ export function subscribeToAnalyses(
 export async function saveUserSettings(settings: UserSettings): Promise<void> {
   const path = 'settings';
   try {
+    try {
+      localStorage.setItem(`user_settings_${settings.ownerId}`, JSON.stringify(settings));
+    } catch (e) {}
     await setDoc(doc(db, path, settings.ownerId), settings);
-  } catch (err) {
+  } catch (err: any) {
+    if (err?.message?.includes('offline')) {
+      console.warn('[Firestore Settings] Saved offline to local storage.');
+      return;
+    }
     handleFirestoreError(err, OperationType.WRITE, `${path}/${settings.ownerId}`);
   }
 }
@@ -257,10 +293,30 @@ export async function getUserSettings(ownerId: string): Promise<UserSettings | n
   try {
     const snap = await getDoc(doc(db, path, ownerId));
     if (snap.exists()) {
-      return snap.data() as UserSettings;
+      const data = snap.data() as UserSettings;
+      try {
+        localStorage.setItem(`user_settings_${ownerId}`, JSON.stringify(data));
+      } catch (e) {}
+      return data;
     }
+    // Check local fallback
+    try {
+      const cached = localStorage.getItem(`user_settings_${ownerId}`);
+      if (cached) return JSON.parse(cached) as UserSettings;
+    } catch (e) {}
     return null;
-  } catch (err) {
+  } catch (err: any) {
+    console.warn(`[Firestore Settings] Fallback for ${ownerId}:`, err?.message || err);
+    try {
+      const cached = localStorage.getItem(`user_settings_${ownerId}`);
+      if (cached) {
+        return JSON.parse(cached) as UserSettings;
+      }
+    } catch (e) {}
+    // If offline, return null rather than breaking the application with an unhandled exception
+    if (err?.message?.includes('offline') || String(err).includes('offline')) {
+      return null;
+    }
     handleFirestoreError(err, OperationType.GET, `${path}/${ownerId}`);
   }
 }

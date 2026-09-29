@@ -29,6 +29,7 @@ export const GmailAlertModal: React.FC<GmailAlertModalProps> = ({
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
   const [recentEmails, setRecentEmails] = useState<Array<{ id: string; snippet: string }>>([]);
   const [isLoadingEmails, setIsLoadingEmails] = useState(false);
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
 
   useEffect(() => {
     if (userEmail) setRecipient(userEmail);
@@ -142,10 +143,20 @@ export const GmailAlertModal: React.FC<GmailAlertModalProps> = ({
             </p>
             <button
               id="btn-login-for-gmail"
-              onClick={onRequireLogin}
-              className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-lg cursor-pointer transition-colors self-start"
+              onClick={async () => {
+                if (isLoggingIn) return;
+                setIsLoggingIn(true);
+                try {
+                  await onRequireLogin();
+                } finally {
+                  setIsLoggingIn(false);
+                }
+              }}
+              disabled={isLoggingIn}
+              className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-bold rounded-lg cursor-pointer transition-colors self-start flex items-center gap-2"
             >
-              تسجيل الدخول وتفعيل Gmail الآن
+              {isLoggingIn && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+              <span>{isLoggingIn ? 'جاري الاتصال...' : 'تسجيل الدخول وتفعيل Gmail الآن'}</span>
             </button>
           </div>
         ) : (

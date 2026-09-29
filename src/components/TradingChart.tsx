@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import {
   TrendingUp,
   TrendingDown,
@@ -10,6 +10,12 @@ import {
   CheckCircle2,
   Crosshair,
   Info,
+  Target,
+  Layers,
+  ShieldCheck,
+  Flame,
+  AlertTriangle,
+  BellRing,
 } from 'lucide-react';
 import {
   calculateEMA,
@@ -17,10 +23,16 @@ import {
   calculateBollingerBands,
   calculateRSI,
   calculateMACD,
+  calculateATR,
   detectTradingOpportunities,
+  detectVolatilitySpikes,
   type TradingOpportunity,
+  type VolatilitySpike,
 } from '../lib/indicators.ts';
 import { BingXTradingViewChart } from './BingXTradingViewChart.tsx';
+import { ChartLottieMarkers } from './ChartLottieMarkers.tsx';
+import type { PriceAlert } from '../lib/alertsService.ts';
+import type { TradeRecord } from '../lib/firestoreService.ts';
 
 export interface KlineBar {
   time: number;
@@ -43,6 +55,13 @@ interface TradingChartProps {
   takeProfit3?: number;
   isLoading?: boolean;
   onSelectOpportunity?: (opp: TradingOpportunity) => void;
+  onExecuteTrade?: (side: 'LONG' | 'SHORT', price: number, sl?: number, tp?: number) => void;
+  onClearLevels?: () => void;
+  alerts?: PriceAlert[];
+  onAddAlert?: (alert: Omit<PriceAlert, 'id' | 'createdAt' | 'triggered'>) => void;
+  onDeleteAlert?: (id: string) => void;
+  onVolatilitySpikeDetected?: (spike: VolatilitySpike) => void;
+  trades?: TradeRecord[];
 }
 
 export const TradingChart: React.FC<TradingChartProps> = ({
@@ -57,16 +76,65 @@ export const TradingChart: React.FC<TradingChartProps> = ({
   takeProfit3,
   isLoading = false,
   onSelectOpportunity,
+  onExecuteTrade,
+  onClearLevels,
+  alerts,
+  onAddAlert,
+  onDeleteAlert,
+  onVolatilitySpikeDetected,
+  trades = [],
 }) => {
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const [showIndicators, setShowIndicators] = useState(true);
   const [showBollinger, setShowBollinger] = useState(true);
   const [showSMA200, setShowSMA200] = useState(true);
+  const [showSMC, setShowSMC] = useState(true);
+  const [showLottieMarkers, setShowLottieMarkers] = useState(true);
   const [subIndicator, setSubIndicator] = useState<'RSI' | 'MACD'>('MACD');
   const [selectedOpportunity, setSelectedOpportunity] = useState<TradingOpportunity | null>(null);
   const [chartViewMode, setChartViewMode] = useState<'tradingview' | 'ai-pattern'>('tradingview');
 
+  // Volatility Spike Alert & Color System State
+  const [volatilitySensitivity, setVolatilitySensitivity] = useState<'SENSITIVE' | 'NORMAL' | 'EXTREME'>('NORMAL');
+  const [highlightVolatilitySpikes, setHighlightVolatilitySpikes] = useState(true);
+  const [dismissedSpikeTime, setDismissedSpikeTime] = useState<number | null>(null);
+  const [showVolatilityPanel, setShowVolatilityPanel] = useState(false);
+  const [simulatedSpike, setSimulatedSpike] = useState<VolatilitySpike | null>(null);
+
   const intervals = ['1m', '5m', '15m', '1h', '4h', '1d'];
+
+  // Volatility Spikes calculation
+  const volatilitySpikes = useMemo(() => {
+    const detected = detectVolatilitySpikes(klines, { sensitivity: volatilitySensitivity, pair });
+    if (simulatedSpike && klines.length > 0) {
+      return [...detected, { ...simulatedSpike, candleIndex: klines.length - 1 }];
+    }
+    return detected;
+  }, [klines, volatilitySensitivity, pair, simulatedSpike]);
+
+  const spikesByIndex = useMemo(() => {
+    const map = new Map<number, VolatilitySpike>();
+    volatilitySpikes.forEach(s => map.set(s.candleIndex, s));
+    return map;
+  }, [volatilitySpikes]);
+
+  const activeSpike = useMemo(() => {
+    if (volatilitySpikes.length === 0) return null;
+    const lastSpike = volatilitySpikes[volatilitySpikes.length - 1];
+    if (klines.length - 1 - lastSpike.candleIndex <= 2 && lastSpike.time !== dismissedSpikeTime) {
+      return lastSpike;
+    }
+    return null;
+  }, [volatilitySpikes, klines.length, dismissedSpikeTime]);
+
+  const lastAlertedSpikeTimeRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (activeSpike && activeSpike.time !== lastAlertedSpikeTimeRef.current) {
+      lastAlertedSpikeTimeRef.current = activeSpike.time;
+      onVolatilitySpikeDetected?.(activeSpike);
+    }
+  }, [activeSpike, onVolatilitySpikeDetected]);
 
   // Calculate all technical indicators
   const {
@@ -77,6 +145,8 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     rsi,
     macd,
     opportunities,
+    demandZone,
+    supplyZone,
     minPrice,
     maxPrice,
     maxVolume,
@@ -90,6 +160,8 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         rsi: [],
         macd: { macdLine: [], signalLine: [], histogram: [] },
         opportunities: [],
+        demandZone: null,
+        supplyZone: null,
         minPrice: 0,
         maxPrice: 1,
         maxVolume: 1,
@@ -109,6 +181,31 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     const rsiData = calculateRSI(prices, 14);
     const macdData = calculateMACD(prices, 12, 26, 9);
     const opps = detectTradingOpportunities(klines, e20, e50, rsiData, macdData, bBands);
+
+    // Institutional Order Blocks / Liquidity Zones (Smart Money Concepts)
+    let dZone: { high: number; low: number; label: string } | null = null;
+    let sZone: { high: number; low: number; label: string } | null = null;
+
+    if (klines.length > 8) {
+      const recent = klines.slice(-Math.min(klines.length, 35));
+      const lowestCandle = recent.reduce((minC, k) => (k.low < minC.low ? k : minC), recent[0]);
+      const highestCandle = recent.reduce((maxC, k) => (k.high > maxC.high ? k : maxC), recent[0]);
+
+      if (lowestCandle) {
+        dZone = {
+          high: Math.max(lowestCandle.open, lowestCandle.close),
+          low: lowestCandle.low,
+          label: 'منطقة طلب مؤسسية (Demand / Order Block)',
+        };
+      }
+      if (highestCandle) {
+        sZone = {
+          high: highestCandle.high,
+          low: Math.min(highestCandle.open, highestCandle.close),
+          label: 'منطقة عرض ومقاومة (Supply / Order Block)',
+        };
+      }
+    }
 
     // Expand bounds if overlay levels exist
     if (entryPrice) {
@@ -152,6 +249,8 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       rsi: rsiData,
       macd: macdData,
       opportunities: opps,
+      demandZone: dZone,
+      supplyZone: sZone,
       minPrice: min,
       maxPrice: max,
       maxVolume: maxVol,
@@ -283,21 +382,348 @@ export const TradingChart: React.FC<TradingChartProps> = ({
           </button>
         </div>
 
-        <div className="flex items-center gap-2 text-xs text-slate-400 font-mono px-2">
-          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-          <span className="text-white font-bold">{pair}</span>
-          <span className="text-slate-500">|</span>
-          <span className="text-emerald-400 font-sans">تغذية الأسعار متصلة</span>
+        {/* Volatility Radar Status & Controls Dropdown */}
+        <div className="flex items-center gap-2 relative">
+          <button
+            type="button"
+            id="btn-volatility-radar-menu"
+            onClick={() => setShowVolatilityPanel(!showVolatilityPanel)}
+            className={`px-2.5 py-1.5 rounded-lg text-xs font-bold border transition-all cursor-pointer flex items-center gap-1.5 shadow-sm ${
+              activeSpike
+                ? activeSpike.type === 'BULLISH_SPIKE'
+                  ? 'bg-emerald-950/90 border-emerald-500 text-emerald-300 shadow-emerald-950/60 animate-pulse'
+                  : 'bg-rose-950/90 border-rose-500 text-rose-300 shadow-rose-950/60 animate-pulse'
+                : 'bg-slate-950 hover:bg-slate-900 border-slate-800 text-slate-300 hover:text-cyan-300'
+            }`}
+            title="نظام رصد الانحرافات السعرية الكبيرة وتحديث ألوان الشارت"
+          >
+            <Flame className={`w-3.5 h-3.5 ${activeSpike ? 'text-amber-300 animate-bounce' : 'text-amber-400'}`} />
+            <span>{activeSpike ? `${activeSpike.badgeLabel} طفرة تقلب` : 'رادار التقلب (ATR)'}</span>
+            <span className="text-[10px] text-slate-400 font-mono">({volatilitySpikes.length})</span>
+          </button>
+
+          {/* Volatility Settings & Simulation Dropdown Panel */}
+          {showVolatilityPanel && (
+            <div className="absolute left-0 top-full mt-2 w-80 bg-slate-900 border border-slate-700 rounded-xl p-3.5 shadow-2xl z-30 flex flex-col gap-3 text-xs animate-in fade-in zoom-in-95 duration-150">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                <span className="font-bold text-white flex items-center gap-1.5">
+                  <Flame className="w-4 h-4 text-amber-400" />
+                  <span>نظام رصد الانحرافات السعرية (Volatility Spikes)</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setShowVolatilityPanel(false)}
+                  className="text-slate-400 hover:text-white text-xs p-1 cursor-pointer"
+                >
+                  ✕
+                </button>
+              </div>
+
+              {/* Toggle Candle Highlighting */}
+              <label className="flex items-center justify-between p-2 rounded-lg bg-slate-950 border border-slate-800 cursor-pointer">
+                <span className="text-slate-200">تلوين شموع الانحرافات آلياً بالشارت</span>
+                <input
+                  type="checkbox"
+                  checked={highlightVolatilitySpikes}
+                  onChange={e => setHighlightVolatilitySpikes(e.target.checked)}
+                  className="rounded accent-cyan-500"
+                />
+              </label>
+
+              {/* Sensitivity Selector */}
+              <div>
+                <span className="text-slate-400 text-[11px] block mb-1">حساسية رصد الانحرافات السعرية:</span>
+                <div className="grid grid-cols-3 gap-1 bg-slate-950 p-1 rounded-lg border border-slate-800 text-[11px]">
+                  {(['SENSITIVE', 'NORMAL', 'EXTREME'] as const).map(sens => (
+                    <button
+                      key={sens}
+                      type="button"
+                      onClick={() => setVolatilitySensitivity(sens)}
+                      className={`py-1 rounded text-center font-bold transition-colors cursor-pointer ${
+                        volatilitySensitivity === sens
+                          ? 'bg-cyan-950 border border-cyan-500 text-cyan-300'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      {sens === 'SENSITIVE' ? 'مرتفعة (1.5x)' : sens === 'NORMAL' ? 'عادية (1.9x)' : 'قصوى (2.6x)'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Instant Simulation Tools to Test Notifications & Colors */}
+              <div className="flex flex-col gap-1.5 pt-1 border-t border-slate-800">
+                <span className="text-slate-400 text-[10px]">تجربة محاكاة التنبيه الفوري وتلوين الشارت:</span>
+                <div className="grid grid-cols-2 gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (klines.length === 0) return;
+                      const lastC = klines[klines.length - 1];
+                      const sim: VolatilitySpike = {
+                        candleIndex: klines.length - 1,
+                        time: Date.now(),
+                        pair,
+                        type: 'BULLISH_SPIKE',
+                        severity: 'HIGH',
+                        range: lastC.close * 0.028,
+                        atr: lastC.close * 0.012,
+                        spikeRatio: 2.3,
+                        priceChangePct: 2.85,
+                        candle: lastC,
+                        color: '#00ff9d',
+                        glowColor: 'rgba(0, 255, 157, 0.75)',
+                        badgeLabel: '🚀 +2.85%',
+                        titleArabic: '⚡ طفرة صعودية مفاجئة (Bullish Volatility Spike)',
+                        messageArabic: 'صعود سعري انفجاري بنسبة +2.85% تجاوز نطاق الـ ATR بمقدار 2.3x أضعاف مع تدفق سيولة شرائية مفاجئة.',
+                        actionTipArabic: 'تجنب مطاردة الشراء في القمة؛ انتظر تصحيحاً نحو مناطق الطلب.',
+                      };
+                      setSimulatedSpike(sim);
+                      setDismissedSpikeTime(null);
+                      setShowVolatilityPanel(false);
+                    }}
+                    className="p-1.5 rounded-lg bg-emerald-950/80 hover:bg-emerald-900 border border-emerald-700/80 text-emerald-300 font-bold text-[10px] text-center transition-colors cursor-pointer"
+                  >
+                    🚀 محاكاة طفرة صعود
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (klines.length === 0) return;
+                      const lastC = klines[klines.length - 1];
+                      const sim: VolatilitySpike = {
+                        candleIndex: klines.length - 1,
+                        time: Date.now(),
+                        pair,
+                        type: 'BEARISH_SPIKE',
+                        severity: 'EXTREME',
+                        range: lastC.close * 0.034,
+                        atr: lastC.close * 0.012,
+                        spikeRatio: 2.8,
+                        priceChangePct: -3.40,
+                        candle: lastC,
+                        color: '#ff0055',
+                        glowColor: 'rgba(255, 0, 85, 0.75)',
+                        badgeLabel: '💥 -3.40%',
+                        titleArabic: '🚨 هبوط سعري حاد فائق (Flash Dump Spike)',
+                        messageArabic: 'انخفاض سعري حاد بنسبة -3.40% تجاوز نطاق الـ ATR بـ 2.8x ضعفاً وسط ضغط بيعي وتصفية صفقات شراء.',
+                        actionTipArabic: 'فعّل أوامر الحماية ووقف الخسارة فوراً وتجنب الشراء قبل ثبوت السعر.',
+                      };
+                      setSimulatedSpike(sim);
+                      setDismissedSpikeTime(null);
+                      setShowVolatilityPanel(false);
+                    }}
+                    className="p-1.5 rounded-lg bg-rose-950/80 hover:bg-rose-900 border border-rose-700/80 text-rose-300 font-bold text-[10px] text-center transition-colors cursor-pointer"
+                  >
+                    💥 محاكاة هبوط حاد
+                  </button>
+                </div>
+                {simulatedSpike && (
+                  <button
+                    type="button"
+                    onClick={() => setSimulatedSpike(null)}
+                    className="text-[10px] text-slate-400 hover:text-white text-center pt-1 cursor-pointer"
+                  >
+                    إلغاء المحاكاة والعودة للبيانات الحية
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
+          <div className="flex items-center gap-2 text-xs text-slate-400 font-mono px-2">
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+            <span className="text-white font-bold">{pair}</span>
+            <span className="text-slate-500">|</span>
+            <span className="text-emerald-400 font-sans">تغذية متصلة</span>
+          </div>
         </div>
       </div>
+
+      {/* Volatility Spike Real-Time Alert Banner */}
+      {activeSpike && (
+        <div className={`p-3.5 rounded-xl border flex flex-wrap items-center justify-between gap-3 shadow-xl backdrop-blur-md animate-in slide-in-from-top duration-300 ${
+          activeSpike.type === 'BULLISH_SPIKE'
+            ? 'bg-gradient-to-r from-emerald-950/90 via-slate-900 to-teal-950/90 border-emerald-500/70 shadow-emerald-950/30'
+            : activeSpike.type === 'BEARISH_SPIKE'
+            ? 'bg-gradient-to-r from-rose-950/90 via-slate-900 to-red-950/90 border-rose-500/70 shadow-rose-950/30'
+            : 'bg-gradient-to-r from-amber-950/90 via-slate-900 to-yellow-950/90 border-amber-500/70 shadow-amber-950/30'
+        }`}>
+          <div className="flex items-center gap-3">
+            <div className={`p-2.5 rounded-xl border ${
+              activeSpike.type === 'BULLISH_SPIKE'
+                ? 'bg-emerald-500/20 border-emerald-400 text-emerald-300 animate-pulse'
+                : 'bg-rose-500/20 border-rose-400 text-rose-300 animate-pulse'
+            }`}>
+              <AlertTriangle className="w-5 h-5" />
+            </div>
+            <div className="flex flex-col gap-0.5 text-right">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="font-extrabold text-sm text-white">{activeSpike.titleArabic}</span>
+                <span className={`px-2 py-0.5 rounded-full font-mono text-[10px] font-bold ${
+                  activeSpike.type === 'BULLISH_SPIKE'
+                    ? 'bg-emerald-900/80 text-emerald-200 border border-emerald-600'
+                    : 'bg-rose-900/80 text-rose-200 border border-rose-600'
+                }`}>
+                  {activeSpike.badgeLabel}
+                </span>
+                <span className="text-[11px] text-slate-300 font-mono">({activeSpike.spikeRatio.toFixed(1)}x ATR)</span>
+              </div>
+              <p className="text-xs text-slate-200/90">{activeSpike.messageArabic}</p>
+              <p className="text-[11px] font-semibold text-amber-300/90">💡 نصيحة المتداول: {activeSpike.actionTipArabic}</p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {onExecuteTrade && (
+              <button
+                type="button"
+                onClick={() => {
+                  const side = activeSpike.type === 'BULLISH_SPIKE' ? 'LONG' : 'SHORT';
+                  onExecuteTrade(side, activeSpike.candle.close);
+                }}
+                className={`px-3.5 py-1.5 rounded-lg text-xs font-bold text-white shadow-md transition-all cursor-pointer ${
+                  activeSpike.type === 'BULLISH_SPIKE'
+                    ? 'bg-emerald-600 hover:bg-emerald-500 shadow-emerald-950/40'
+                    : 'bg-rose-600 hover:bg-rose-500 shadow-rose-950/40'
+                }`}
+              >
+                صفقة سريعة ({activeSpike.type === 'BULLISH_SPIKE' ? 'شراء 📈' : 'بيع 📉'})
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setDismissedSpikeTime(activeSpike.time)}
+              className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white text-xs cursor-pointer transition-colors"
+            >
+              ✕ إخفاء التنبيه
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Active Trade Levels HUD Bar */}
+      {(entryPrice || stopLoss || takeProfit) && (
+        <div className="bg-slate-900/95 border border-cyan-500/40 rounded-xl p-3 flex flex-wrap items-center justify-between gap-3 shadow-lg shadow-cyan-950/20 backdrop-blur-md">
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="flex items-center gap-1.5 text-xs font-bold text-cyan-400 bg-cyan-950/80 px-2.5 py-1 rounded-md border border-cyan-800">
+              <Target className="w-3.5 h-3.5" />
+              <span>مستويات الصفقة المحددة:</span>
+            </span>
+
+            {entryPrice && (
+              <div className="flex items-center gap-1 text-xs font-mono">
+                <span className="text-slate-400">الدخول:</span>
+                <span className="font-bold text-cyan-300 bg-slate-950 px-2 py-0.5 rounded border border-slate-800">
+                  ${(entryPrice ?? 0).toLocaleString()}
+                </span>
+              </div>
+            )}
+
+            {stopLoss && (
+              <div className="flex items-center gap-1 text-xs font-mono">
+                <span className="text-slate-400">وقف الخسارة (SL):</span>
+                <span className="font-bold text-rose-400 bg-rose-950/60 px-2 py-0.5 rounded border border-rose-800">
+                  ${(stopLoss ?? 0).toLocaleString()}
+                  {entryPrice && (
+                    <span className="text-[10px] text-rose-300 mr-1">
+                      (-{((Math.abs(entryPrice - stopLoss) / entryPrice) * 100).toFixed(1)}%)
+                    </span>
+                  )}
+                </span>
+              </div>
+            )}
+
+            {takeProfit && (
+              <div className="flex items-center gap-1 text-xs font-mono">
+                <span className="text-slate-400">الهدف الأول (TP1):</span>
+                <span className="font-bold text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-800">
+                  ${(takeProfit ?? 0).toLocaleString()}
+                  {entryPrice && (
+                    <span className="text-[10px] text-emerald-300 mr-1">
+                      (+{((Math.abs(takeProfit - entryPrice) / entryPrice) * 100).toFixed(1)}%)
+                    </span>
+                  )}
+                </span>
+              </div>
+            )}
+
+            {takeProfit2 && (
+              <div className="flex items-center gap-1 text-xs font-mono">
+                <span className="text-slate-400">الهدف الثاني (TP2):</span>
+                <span className="font-bold text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-800">
+                  ${(takeProfit2 ?? 0).toLocaleString()}
+                </span>
+              </div>
+            )}
+
+            {takeProfit3 && (
+              <div className="flex items-center gap-1 text-xs font-mono">
+                <span className="text-slate-400">الهدف الثالث (TP3):</span>
+                <span className="font-bold text-teal-400 bg-teal-950/60 px-2 py-0.5 rounded border border-teal-800">
+                  ${(takeProfit3 ?? 0).toLocaleString()}
+                </span>
+              </div>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2">
+            {onExecuteTrade && (
+              <button
+                onClick={() => {
+                  const side = takeProfit && entryPrice && takeProfit > entryPrice ? 'LONG' : 'SHORT';
+                  onExecuteTrade(side, entryPrice || 0, stopLoss, takeProfit);
+                }}
+                className="px-3.5 py-1.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white rounded-lg text-xs font-bold transition-all shadow-md cursor-pointer flex items-center gap-1.5"
+              >
+                <Zap className="w-3.5 h-3.5" />
+                <span>تنفيذ الصفقة فوراً</span>
+              </button>
+            )}
+
+            {onClearLevels && (
+              <button
+                onClick={onClearLevels}
+                className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white rounded-lg text-xs font-medium transition-colors cursor-pointer"
+                title="إخفاء المستويات من على الشارت"
+              >
+                ✕ مسح
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {chartViewMode === 'tradingview' ? (
         <BingXTradingViewChart
           pair={pair}
           interval={interval}
+          currentPrice={klines && klines.length > 0 ? klines[klines.length - 1].close : undefined}
+          high24h={klines && klines.length > 0 ? Math.max(...klines.map(k => k.high)) : undefined}
+          low24h={klines && klines.length > 0 ? Math.min(...klines.map(k => k.low)) : undefined}
+          klines={klines}
+          alerts={alerts}
+          onAddAlert={onAddAlert}
+          onDeleteAlert={onDeleteAlert}
+          onExecuteTrade={async (trade: any) => {
+            if (onExecuteTrade) {
+              onExecuteTrade(trade.side, trade.entryPrice, trade.stopLoss, trade.takeProfit);
+            }
+          }}
         />
       ) : (
-        <div id="trading-chart-container" className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-2xl flex flex-col">
+        <div
+          id="trading-chart-container"
+          className={`bg-slate-900 rounded-xl overflow-hidden shadow-2xl flex flex-col transition-all duration-300 ${
+            activeSpike
+              ? activeSpike.type === 'BULLISH_SPIKE'
+                ? 'border-2 border-emerald-400 shadow-xl shadow-emerald-500/25 ring-2 ring-emerald-500/30'
+                : activeSpike.type === 'BEARISH_SPIKE'
+                ? 'border-2 border-rose-500 shadow-xl shadow-rose-500/25 ring-2 ring-rose-500/30'
+                : 'border-2 border-amber-400 shadow-xl shadow-amber-500/25 ring-2 ring-amber-500/30'
+              : 'border border-slate-800'
+          }`}
+        >
           {/* Chart Header Controls Bar */}
           <div className="flex flex-wrap items-center justify-between gap-2.5 px-4 py-3 bg-slate-950/70 border-b border-slate-800 text-sm">
             <div className="flex items-center gap-3">
@@ -374,6 +800,50 @@ export const TradingChart: React.FC<TradingChartProps> = ({
             >
               <span>SMA200</span>
             </button>
+
+            <button
+              id="toggle-smc-btn"
+              onClick={() => setShowSMC(!showSMC)}
+              title="مناطق السيولة وكتل الأوامر المؤسسية Smart Money Concepts"
+              className={`px-2 py-1 rounded transition-colors flex items-center gap-1 cursor-pointer ${
+                showSMC ? 'bg-teal-950 text-teal-300 font-semibold border border-teal-800' : 'text-slate-500 hover:text-slate-300'
+              }`}
+            >
+              <Layers className="w-3 h-3" />
+              <span>SMC</span>
+            </button>
+
+            <button
+              id="toggle-volatility-spikes-btn"
+              onClick={() => setHighlightVolatilitySpikes(!highlightVolatilitySpikes)}
+              title="تفعيل/تعطيل تلوين الشموع عند طفرات التقلب السعري"
+              className={`px-2 py-1 rounded transition-colors flex items-center gap-1 cursor-pointer ${
+                highlightVolatilitySpikes
+                  ? activeSpike
+                    ? activeSpike.type === 'BULLISH_SPIKE'
+                      ? 'bg-emerald-950 text-emerald-300 font-bold border border-emerald-600 animate-pulse'
+                      : 'bg-rose-950 text-rose-300 font-bold border border-rose-600 animate-pulse'
+                    : 'bg-amber-950 text-amber-300 font-semibold border border-amber-800'
+                  : 'text-slate-500 hover:text-slate-300'
+              }`}
+            >
+              <Flame className="w-3 h-3 text-amber-400" />
+              <span>طفرات التقلب ({volatilitySpikes.length})</span>
+            </button>
+
+            <button
+              id="toggle-lottie-markers-btn"
+              onClick={() => setShowLottieMarkers(!showLottieMarkers)}
+              title="تفعيل/تعطيل علامات صفقات الوكلاء الحركية Lottie مع تفاصيل الربح والخسارة"
+              className={`px-2 py-1 rounded transition-colors flex items-center gap-1 cursor-pointer ${
+                showLottieMarkers
+                  ? 'bg-purple-950 text-purple-300 font-semibold border border-purple-700'
+                  : 'text-slate-500 hover:text-slate-300'
+              }`}
+            >
+              <Target className="w-3 h-3 text-purple-400" />
+              <span>علامات صفقات AI</span>
+            </button>
           </div>
 
           {/* Sub Oscillator Selector */}
@@ -411,19 +881,20 @@ export const TradingChart: React.FC<TradingChartProps> = ({
           </div>
         )}
 
-        <svg
-          viewBox={`0 0 ${svgWidth} ${mainHeight + subPanelHeight + 25}`}
-          className="w-full min-w-[700px] h-[440px] select-none cursor-crosshair"
-          onMouseMove={e => {
-            const rect = e.currentTarget.getBoundingClientRect();
-            const mouseX = ((e.clientX - rect.left) / rect.width) * svgWidth;
-            if (mouseX >= paddingLeft && mouseX <= chartWidth + paddingLeft) {
-              const idx = Math.round(((mouseX - paddingLeft) / chartWidth) * (klines.length - 1));
-              if (idx >= 0 && idx < klines.length) setHoveredIndex(idx);
-            }
-          }}
-          onMouseLeave={() => setHoveredIndex(null)}
-        >
+        <div className="relative w-full min-w-[700px] h-[440px]">
+          <svg
+            viewBox={`0 0 ${svgWidth} ${mainHeight + subPanelHeight + 25}`}
+            className="w-full h-full select-none cursor-crosshair"
+            onMouseMove={e => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              const mouseX = ((e.clientX - rect.left) / rect.width) * svgWidth;
+              if (mouseX >= paddingLeft && mouseX <= chartWidth + paddingLeft) {
+                const idx = Math.round(((mouseX - paddingLeft) / chartWidth) * (klines.length - 1));
+                if (idx >= 0 && idx < klines.length) setHoveredIndex(idx);
+              }
+            }}
+            onMouseLeave={() => setHoveredIndex(null)}
+          >
           <defs>
             <linearGradient id="bullishVolGrad" x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stopColor="#10b981" stopOpacity="0.4" />
@@ -437,6 +908,12 @@ export const TradingChart: React.FC<TradingChartProps> = ({
               <stop offset="0%" stopColor="#6366f1" stopOpacity="0.12" />
               <stop offset="100%" stopColor="#6366f1" stopOpacity="0.04" />
             </linearGradient>
+            <filter id="glow-bullish" x="-20%" y="-20%" width="140%" height="140%">
+              <feDropShadow dx="0" dy="0" stdDeviation="3.5" floodColor="#00ff9d" floodOpacity="0.85" />
+            </filter>
+            <filter id="glow-bearish" x="-20%" y="-20%" width="140%" height="140%">
+              <feDropShadow dx="0" dy="0" stdDeviation="3.5" floodColor="#ff0055" floodOpacity="0.85" />
+            </filter>
           </defs>
 
           {/* Grid lines */}
@@ -481,6 +958,85 @@ export const TradingChart: React.FC<TradingChartProps> = ({
             </g>
           )}
 
+          {/* Institutional Order Blocks (SMC zones) */}
+          {showSMC && demandZone && (
+            <g id="smc-demand-zone">
+              <rect
+                x={paddingLeft}
+                y={Math.min(getY(demandZone.high), getY(demandZone.low))}
+                width={chartWidth}
+                height={Math.max(Math.abs(getY(demandZone.high) - getY(demandZone.low)), 7)}
+                fill="#10b981"
+                fillOpacity="0.10"
+                stroke="#10b981"
+                strokeWidth="1"
+                strokeDasharray="4 2"
+                strokeOpacity="0.45"
+              />
+              <text
+                x={paddingLeft + 8}
+                y={Math.min(getY(demandZone.high), getY(demandZone.low)) + 11}
+                fill="#34d399"
+                fontSize="9"
+                fontWeight="bold"
+              >
+                {demandZone.label} (${demandZone.low.toFixed(1)} - ${demandZone.high.toFixed(1)})
+              </text>
+            </g>
+          )}
+
+          {showSMC && supplyZone && (
+            <g id="smc-supply-zone">
+              <rect
+                x={paddingLeft}
+                y={Math.min(getY(supplyZone.high), getY(supplyZone.low))}
+                width={chartWidth}
+                height={Math.max(Math.abs(getY(supplyZone.high) - getY(supplyZone.low)), 7)}
+                fill="#f43f5e"
+                fillOpacity="0.10"
+                stroke="#f43f5e"
+                strokeWidth="1"
+                strokeDasharray="4 2"
+                strokeOpacity="0.45"
+              />
+              <text
+                x={paddingLeft + 8}
+                y={Math.min(getY(supplyZone.high), getY(supplyZone.low)) + 11}
+                fill="#fb7185"
+                fontSize="9"
+                fontWeight="bold"
+              >
+                {supplyZone.label} (${supplyZone.low.toFixed(1)} - ${supplyZone.high.toFixed(1)})
+              </text>
+            </g>
+          )}
+
+          {/* Visual Risk:Reward Long/Short Target Zones */}
+          {entryPrice && takeProfit && (
+            <g id="tp-profit-zone">
+              <rect
+                x={paddingLeft}
+                y={Math.min(getY(entryPrice), getY(takeProfit))}
+                width={chartWidth}
+                height={Math.abs(getY(entryPrice) - getY(takeProfit))}
+                fill="#10b981"
+                fillOpacity="0.08"
+              />
+            </g>
+          )}
+          {entryPrice && stopLoss && (
+            <g id="sl-loss-zone">
+              <rect
+                x={paddingLeft}
+                y={Math.min(getY(entryPrice), getY(stopLoss))}
+                width={chartWidth}
+                height={Math.abs(getY(entryPrice) - getY(stopLoss))}
+                fill="#f43f5e"
+                fillOpacity="0.08"
+              />
+            </g>
+          )}
+
           {/* Moving Averages: EMA 20, EMA 50, SMA 200 */}
           {showIndicators && (
             <g id="moving-averages-layer">
@@ -492,7 +1048,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
             </g>
           )}
 
-          {/* Candlesticks */}
+          {/* Candlesticks with Dynamic Volatility Spike Coloring */}
           {klines.map((k, i) => {
             const x = getX(i);
             const isBull = k.close >= k.open;
@@ -502,19 +1058,60 @@ export const TradingChart: React.FC<TradingChartProps> = ({
             const lowY = getY(k.low);
             const bodyTop = Math.min(openY, closeY);
             const bodyH = Math.max(Math.abs(openY - closeY), 1.5);
-            const color = isBull ? '#10b981' : '#f43f5e';
+
+            const spike = highlightVolatilitySpikes ? spikesByIndex.get(i) : undefined;
+            let color = isBull ? '#10b981' : '#f43f5e';
+            let strokeWidth = '1.2';
+            let filterStr: string | undefined = undefined;
+
+            if (spike) {
+              color = spike.color;
+              strokeWidth = '2';
+              filterStr = spike.type === 'BULLISH_SPIKE' ? 'url(#glow-bullish)' : 'url(#glow-bearish)';
+            }
 
             return (
-              <g key={`candle-${i}`}>
-                <line x1={x} y1={highY} x2={x} y2={lowY} stroke={color} strokeWidth="1.2" />
+              <g key={`candle-${i}`} filter={filterStr}>
+                <line x1={x} y1={highY} x2={x} y2={lowY} stroke={color} strokeWidth={strokeWidth} />
                 <rect
                   x={x - candleWidth / 2}
                   y={bodyTop}
                   width={candleWidth}
                   height={bodyH}
                   fill={color}
+                  stroke={spike ? '#ffffff' : undefined}
+                  strokeWidth={spike ? '0.8' : undefined}
                   rx="1"
                 />
+                {spike && (
+                  <g pointerEvents="none">
+                    {spike.type === 'BULLISH_SPIKE' ? (
+                      <text
+                        x={x}
+                        y={lowY + 13}
+                        textAnchor="middle"
+                        fill={spike.color}
+                        fontSize="8.5"
+                        fontWeight="bold"
+                        filter="drop-shadow(0px 1px 2px rgba(0,0,0,0.9))"
+                      >
+                        {spike.badgeLabel}
+                      </text>
+                    ) : (
+                      <text
+                        x={x}
+                        y={highY - 6}
+                        textAnchor="middle"
+                        fill={spike.color}
+                        fontSize="8.5"
+                        fontWeight="bold"
+                        filter="drop-shadow(0px 1px 2px rgba(0,0,0,0.9))"
+                      >
+                        {spike.badgeLabel}
+                      </text>
+                    )}
+                  </g>
+                )}
               </g>
             );
           })}
@@ -662,7 +1259,23 @@ export const TradingChart: React.FC<TradingChartProps> = ({
             </g>
           )}
         </svg>
+
+        {/* Lottie-based entry/exit markers with tooltips */}
+        {showLottieMarkers && trades && trades.length > 0 && (
+          <ChartLottieMarkers
+            trades={trades}
+            klines={klines}
+            pair={pair}
+            getX={getX}
+            getY={getY}
+            svgWidth={svgWidth}
+            mainHeight={mainHeight}
+            paddingLeft={paddingLeft}
+            paddingRight={paddingRight}
+          />
+        )}
       </div>
+    </div>
 
       {/* Selected Opportunity Info Card */}
       {selectedOpportunity && (
@@ -675,7 +1288,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
             </div>
           </div>
           <div className="flex items-center gap-3">
-            <span className="font-mono text-cyan-300 font-bold">${selectedOpportunity.price.toLocaleString()}</span>
+            <span className="font-mono text-cyan-300 font-bold">${(selectedOpportunity?.price ?? 0).toLocaleString()}</span>
             <span className="bg-emerald-950 text-emerald-300 border border-emerald-800 px-2 py-0.5 rounded text-[10px] font-bold">
               ثقة {selectedOpportunity.confidence}%
             </span>

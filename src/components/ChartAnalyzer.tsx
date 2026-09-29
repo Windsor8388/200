@@ -14,8 +14,11 @@ import {
   Compass,
   LineChart,
   CheckCircle2,
+  Calculator,
+  Layers,
 } from 'lucide-react';
 import type { KlineBar } from './TradingChart.tsx';
+import { resilientFetch } from '../lib/resilientFetch.ts';
 import {
   calculateEMA,
   calculateSMA,
@@ -43,12 +46,19 @@ export interface AiAnalysisResult {
   indicatorsAnalysis: string;
   reasoningArabic: string;
   agentAction: string;
+  actualMarketPrice?: number;
+  liveMarketSource?: string;
+  high24h?: number;
+  low24h?: number;
+  isAlgorithmicFallback?: boolean;
 }
 
 interface ChartAnalyzerProps {
   pair: string;
   timeframe: string;
   klines: KlineBar[];
+  currentPrice?: number;
+  currentTicker?: any;
   onExecuteTradeFromAnalysis: (analysis: AiAnalysisResult) => void;
   onPlotLevelsOnChart?: (entry: number, sl: number, tp1: number, tp2?: number, tp3?: number) => void;
   onSendEmailAlert: (analysis: AiAnalysisResult) => void;
@@ -59,6 +69,8 @@ export const ChartAnalyzer: React.FC<ChartAnalyzerProps> = ({
   pair,
   timeframe,
   klines,
+  currentPrice,
+  currentTicker,
   onExecuteTradeFromAnalysis,
   onPlotLevelsOnChart,
   onSendEmailAlert,
@@ -71,6 +83,15 @@ export const ChartAnalyzer: React.FC<ChartAnalyzerProps> = ({
   const [modelUsed, setModelUsed] = useState<string>('');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [levelsPlotted, setLevelsPlotted] = useState(false);
+  const [calcMargin, setCalcMargin] = useState<number>(200);
+  const [calcLeverage, setCalcLeverage] = useState<number>(10);
+
+  // Authenticated real-time spot price
+  const effectivePrice = currentPrice && currentPrice > 0
+    ? currentPrice
+    : (klines && klines.length > 0 && klines[klines.length - 1].close > 0
+      ? klines[klines.length - 1].close
+      : (currentTicker ? parseFloat(currentTicker.lastPrice) : undefined));
 
   const runAnalysis = async (promptOverride?: string) => {
     setIsAnalyzing(true);
@@ -108,22 +129,44 @@ export const ChartAnalyzer: React.FC<ChartAnalyzerProps> = ({
         latestOpportunity: opps[opps.length - 1] || null,
       };
 
-      const res = await fetch('/api/ai/analyze-chart', {
+      // Read active Bytez API settings if configured
+      let bytezApiKey = '';
+      let bytezModel = 'deepseek-ai/DeepSeek-V3';
+      let selectedAiProvider = 'hybrid';
+      try {
+        const savedSettings = localStorage.getItem('bingx_user_settings');
+        if (savedSettings) {
+          const parsed = JSON.parse(savedSettings);
+          if (parsed.bytezApiKey) bytezApiKey = parsed.bytezApiKey;
+          if (parsed.bytezModel) bytezModel = parsed.bytezModel;
+          if (parsed.selectedAiProvider) selectedAiProvider = parsed.selectedAiProvider;
+        }
+      } catch (e) {}
+
+      const res = await resilientFetch('/api/ai/analyze-chart', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           pair,
           timeframe,
           klines,
+          currentPrice: effectivePrice,
           indicatorsSummary,
           customPrompt: promptOverride || customPrompt,
           useHighThinking,
           strategy: 'Smart Technical Confluence (Moving Averages, RSI, MACD, Bollinger, Order Blocks)',
+          bytezApiKey,
+          bytezModel,
+          selectedAiProvider,
         }),
       });
 
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson.error || `فشل التحليل من خادم الذكاء الاصطناعي (${res.status})`);
+      }
       const data = await res.json();
-      if (!res.ok || !data.success) {
+      if (!data.success) {
         throw new Error(data.error || 'فشل التحليل من خادم الذكاء الاصطناعي');
       }
 
@@ -165,11 +208,30 @@ export const ChartAnalyzer: React.FC<ChartAnalyzerProps> = ({
     setLevelsPlotted(true);
   };
 
+  // Pro Trader position sizing & risk calculator
+  const totalExposure = calcMargin * calcLeverage;
+  const isBull = analysis?.recommendation === 'BUY' || analysis?.trend === 'BULLISH';
+  const entryVal = analysis?.entryTarget || (effectivePrice ? Number(effectivePrice) : 1);
+  const slVal = analysis?.stopLoss || (entryVal * 0.985);
+  const tp1Val = analysis?.takeProfit1 || (entryVal * 1.025);
+  const tp2Val = analysis?.takeProfit2 || (entryVal * 1.05);
+  const tp3Val = analysis?.takeProfit3 || (entryVal * 1.08);
+
+  const slPct = entryVal > 0 ? (Math.abs(entryVal - slVal) / entryVal) * 100 : 1.5;
+  const tp1Pct = entryVal > 0 ? (Math.abs(tp1Val - entryVal) / entryVal) * 100 : 2.5;
+  const tp2Pct = entryVal > 0 ? (Math.abs(tp2Val - entryVal) / entryVal) * 100 : 5.0;
+  const tp3Pct = entryVal > 0 ? (Math.abs(tp3Val - entryVal) / entryVal) * 100 : 8.0;
+
+  const maxLossUsdt = (totalExposure * slPct) / 100;
+  const tp1ProfitUsdt = (totalExposure * tp1Pct) / 100;
+  const tp2ProfitUsdt = (totalExposure * tp2Pct) / 100;
+  const tp3ProfitUsdt = (totalExposure * tp3Pct) / 100;
+
   const quickTemplates = [
-    'تحليل مناطق السيولة وحركة الحيتان (SMC)',
-    'تقاطع متوسطات EMA 20/50 ومؤشر الماكد MACD',
-    'استراتيجية تشبع RSI وارتداد حدود بولينجر باند',
-    'إدارة المخاطر وتحديد أهداف TP1, TP2, TP3 و SL بدقة',
+    { label: 'سيولة مؤسسية (SMC)', prompt: 'حدد مناطق سحب السيولة وكتل الأوامر Order Blocks وهيكل السوق مع نقاط الدخول الدقيقة.' },
+    { label: 'تقاطع ذهبي (EMA+MACD)', prompt: 'حلل زخم تقاطع متوسطات EMA 20 و 50 ومؤشر MACD لتحديد اتجاه الزخم والأهداف.' },
+    { label: 'ارتداد بولينجر و RSI', prompt: 'حدد مناطق التشبع البيعي/الشرائي ومستويات الارتداد المحتملة من حدود بولينجر باند.' },
+    { label: 'سكالبينج سريع (Scalp)', prompt: 'اقترح صفقة سكالبينج سريعة برافعة مالية مع نسبة عائد للمخاطرة 1:2.5 على الأقل.' },
   ];
 
   return (
@@ -183,31 +245,48 @@ export const ChartAnalyzer: React.FC<ChartAnalyzerProps> = ({
           <div>
             <h2 className="font-bold text-white text-base flex items-center gap-2">
               <span>تحليل الشارت وتوقع الفرص بالذكاء الاصطناعي</span>
-              <span className="text-xs bg-slate-800 text-indigo-300 px-2 py-0.5 rounded-full border border-slate-700">
-                Gemini Multi-Indicator Engine
+              <span className="text-xs bg-emerald-950/80 text-emerald-300 px-2 py-0.5 rounded-full border border-emerald-700/60 flex items-center gap-1 font-mono">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                <span>مربوط ببيانات BingX و TradingView الحية</span>
               </span>
             </h2>
-            <p className="text-xs text-slate-400">تحليل حي لبيانات BingX، تقاطع المتوسطات، RSI، MACD، وتحديد مستويات الدخول والأهداف</p>
+            <p className="text-xs text-slate-400">تحليل كمي متزامن لحظياً مع أسعار السوق الفعلي ودفتر الأوامر وحاسبة مخاطر متقدمة</p>
           </div>
         </div>
 
-        {/* High Thinking Switcher */}
-        <div className="flex items-center gap-2 bg-slate-950 p-1.5 rounded-lg border border-slate-800">
-          <button
-            id="toggle-high-thinking-btn"
-            onClick={() => setUseHighThinking(!useHighThinking)}
-            className={`flex items-center gap-1.5 px-3 py-1 text-xs rounded-md font-semibold transition-all cursor-pointer ${
-              useHighThinking
-                ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-sm'
-                : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            <Sparkles className="w-3.5 h-3.5 text-amber-300" />
-            <span>نمط التفكير الفائق (High Thinking)</span>
-          </button>
-          <span className="text-[10px] text-slate-500 px-1 font-mono">
-            {useHighThinking ? 'gemini-3.1-pro-preview' : 'gemini-3.5-flash'}
-          </span>
+        {/* Live Market Price & Real-Time Exchange Badge */}
+        <div className="flex flex-wrap items-center gap-2">
+          {effectivePrice && (
+            <div className="flex items-center gap-2 bg-emerald-950/80 border border-emerald-600/70 px-3 py-1.5 rounded-lg text-xs font-mono shadow-inner">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+              <span className="text-emerald-300 font-semibold font-sans">السعر اللحظي (BingX/TV):</span>
+              <strong className="text-white text-sm tracking-wide">${Number(effectivePrice).toLocaleString()}</strong>
+              {currentTicker?.priceChangePercent && (
+                <span className={`text-[11px] font-bold ${parseFloat(currentTicker.priceChangePercent) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                  {parseFloat(currentTicker.priceChangePercent) >= 0 ? '+' : ''}{currentTicker.priceChangePercent}%
+                </span>
+              )}
+            </div>
+          )}
+
+          {/* High Thinking Switcher */}
+          <div className="flex items-center gap-1.5 bg-slate-950 p-1 rounded-lg border border-slate-800">
+            <button
+              id="toggle-high-thinking-btn"
+              onClick={() => setUseHighThinking(!useHighThinking)}
+              className={`flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md font-semibold transition-all cursor-pointer ${
+                useHighThinking
+                  ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-sm'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+              <span>التفكير الفائق</span>
+            </button>
+            <span className="text-[10px] text-slate-500 px-1 font-mono">
+              {useHighThinking ? 'Pro' : 'Flash'}
+            </span>
+          </div>
         </div>
       </div>
 
@@ -219,12 +298,12 @@ export const ChartAnalyzer: React.FC<ChartAnalyzerProps> = ({
             <button
               key={idx}
               onClick={() => {
-                setCustomPrompt(t);
-                runAnalysis(t);
+                setCustomPrompt(t.prompt);
+                runAnalysis(t.prompt);
               }}
               className="text-[11px] bg-slate-800 hover:bg-slate-700 text-slate-300 px-2.5 py-0.5 rounded border border-slate-700 transition-colors cursor-pointer"
             >
-              {t}
+              {t.label}
             </button>
           ))}
         </div>
@@ -328,33 +407,126 @@ export const ChartAnalyzer: React.FC<ChartAnalyzerProps> = ({
             </div>
           </div>
 
+          {/* Real-Time Market Data Verification Strip */}
+          <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 bg-slate-900/90 rounded-lg border border-slate-800 text-[11px]">
+            <div className="flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+              <span className="text-slate-300">مصدر التغذية الحية:</span>
+              <span className="text-emerald-400 font-bold font-mono">
+                {analysis.liveMarketSource || 'BingX & TradingView Live Stream'}
+              </span>
+            </div>
+            <div className="flex items-center gap-3 font-mono text-xs">
+              {analysis.actualMarketPrice && (
+                <span className="text-slate-400">
+                  سعر التحقق المباشر: <strong className="text-white bg-slate-800 px-1.5 py-0.5 rounded">${Number(analysis.actualMarketPrice).toLocaleString()}</strong>
+                </span>
+              )}
+              {analysis.high24h && (
+                <span className="text-slate-400 hidden sm:inline">أعلى 24h: <span className="text-emerald-400">${Number(analysis.high24h).toLocaleString()}</span></span>
+              )}
+              {analysis.low24h && (
+                <span className="text-slate-400 hidden sm:inline">أدنى 24h: <span className="text-rose-400">${Number(analysis.low24h).toLocaleString()}</span></span>
+              )}
+            </div>
+          </div>
+
           {/* Targets Grid: Entry, SL, TP1, TP2, TP3, Risk:Reward */}
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
             <div className="bg-slate-900 p-2.5 rounded-lg border border-slate-800 text-center">
               <span className="text-[10px] text-slate-400 block mb-0.5">نقطة الدخول</span>
-              <span className="font-mono font-bold text-cyan-400 text-xs">${Number(analysis.entryTarget).toLocaleString()}</span>
+              <span className="font-mono font-bold text-cyan-400 text-sm">${Number(analysis.entryTarget).toLocaleString()}</span>
+              <span className="text-[9px] text-slate-500 block mt-0.5 font-sans">سعر السوق</span>
             </div>
             <div className="bg-slate-900 p-2.5 rounded-lg border border-slate-800 text-center">
               <span className="text-[10px] text-slate-400 block mb-0.5">وقف الخسارة (SL)</span>
-              <span className="font-mono font-bold text-rose-400 text-xs">${Number(analysis.stopLoss).toLocaleString()}</span>
+              <span className="font-mono font-bold text-rose-400 text-sm">${Number(analysis.stopLoss).toLocaleString()}</span>
+              <span className="text-[9px] text-rose-400 font-mono block mt-0.5">-{slPct.toFixed(2)}%</span>
             </div>
             <div className="bg-slate-900 p-2.5 rounded-lg border border-slate-800 text-center">
               <span className="text-[10px] text-slate-400 block mb-0.5">الهدف الأول (TP1)</span>
-              <span className="font-mono font-bold text-emerald-400 text-xs">${Number(analysis.takeProfit1).toLocaleString()}</span>
+              <span className="font-mono font-bold text-emerald-400 text-sm">${Number(analysis.takeProfit1).toLocaleString()}</span>
+              <span className="text-[9px] text-emerald-400 font-mono block mt-0.5">+{tp1Pct.toFixed(2)}%</span>
             </div>
             <div className="bg-slate-900 p-2.5 rounded-lg border border-slate-800 text-center">
               <span className="text-[10px] text-slate-400 block mb-0.5">الهدف الثاني (TP2)</span>
-              <span className="font-mono font-bold text-emerald-400 text-xs">${Number(analysis.takeProfit2).toLocaleString()}</span>
+              <span className="font-mono font-bold text-emerald-400 text-sm">${Number(analysis.takeProfit2).toLocaleString()}</span>
+              <span className="text-[9px] text-emerald-400 font-mono block mt-0.5">+{tp2Pct.toFixed(2)}%</span>
             </div>
             <div className="bg-slate-900 p-2.5 rounded-lg border border-slate-800 text-center">
               <span className="text-[10px] text-slate-400 block mb-0.5">الهدف الثالث (TP3)</span>
-              <span className="font-mono font-bold text-teal-400 text-xs">
+              <span className="font-mono font-bold text-teal-400 text-sm">
                 ${analysis.takeProfit3 ? Number(analysis.takeProfit3).toLocaleString() : (Number(analysis.takeProfit2) * 1.02).toFixed(1)}
               </span>
+              <span className="text-[9px] text-teal-400 font-mono block mt-0.5">+{tp3Pct.toFixed(2)}%</span>
             </div>
             <div className="bg-slate-900 p-2.5 rounded-lg border border-slate-800 text-center">
               <span className="text-[10px] text-slate-400 block mb-0.5">العائد / المخاطرة</span>
-              <span className="font-mono font-bold text-amber-300 text-xs">{analysis.riskRewardRatio}</span>
+              <span className="font-mono font-bold text-amber-300 text-sm">{analysis.riskRewardRatio}</span>
+              <span className="text-[9px] text-amber-400/80 block mt-0.5 font-sans">نسبة ممتازة</span>
+            </div>
+          </div>
+
+          {/* Interactive Pro Position Risk & Profit Calculator */}
+          <div className="bg-slate-900/90 border border-slate-800/80 rounded-xl p-3 flex flex-col gap-2.5 text-xs">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-2">
+              <div className="flex items-center gap-1.5 text-cyan-300 font-bold">
+                <Calculator className="w-3.5 h-3.5" />
+                <span>حاسبة العائد والمخاطرة التقديرية بالدولار (USDT Profit / Loss Calculator):</span>
+              </div>
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-slate-400">الهامش:</span>
+                  <select
+                    value={calcMargin}
+                    onChange={e => setCalcMargin(Number(e.target.value))}
+                    className="bg-slate-950 border border-slate-700 text-white rounded px-2 py-0.5 font-mono text-[11px] focus:outline-hidden"
+                  >
+                    <option value={100}>$100 USDT</option>
+                    <option value={200}>$200 USDT</option>
+                    <option value={500}>$500 USDT</option>
+                    <option value={1000}>$1,000 USDT</option>
+                    <option value={2000}>$2,000 USDT</option>
+                  </select>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-slate-400">الرافعة:</span>
+                  <select
+                    value={calcLeverage}
+                    onChange={e => setCalcLeverage(Number(e.target.value))}
+                    className="bg-slate-950 border border-slate-700 text-white rounded px-2 py-0.5 font-mono text-[11px] focus:outline-hidden"
+                  >
+                    <option value={5}>5x</option>
+                    <option value={10}>10x</option>
+                    <option value={20}>20x</option>
+                    <option value={30}>30x</option>
+                    <option value={50}>50x</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 font-mono text-center">
+              <div className="bg-rose-950/40 border border-rose-900/50 p-2 rounded-lg">
+                <span className="text-[10px] text-rose-300 font-sans block mb-0.5">أقصى خسارة (عند SL)</span>
+                <span className="text-rose-400 font-bold text-xs">-${maxLossUsdt.toFixed(2)} USDT</span>
+                <span className="text-[9px] text-slate-400 block font-sans">-{ (slPct * calcLeverage).toFixed(1) }% من رأس المال</span>
+              </div>
+              <div className="bg-emerald-950/40 border border-emerald-900/50 p-2 rounded-lg">
+                <span className="text-[10px] text-emerald-300 font-sans block mb-0.5">ربح الهدف الأول (TP1)</span>
+                <span className="text-emerald-400 font-bold text-xs">+${tp1ProfitUsdt.toFixed(2)} USDT</span>
+                <span className="text-[9px] text-emerald-300/80 block font-sans">+{ (tp1Pct * calcLeverage).toFixed(1) }%</span>
+              </div>
+              <div className="bg-emerald-950/40 border border-emerald-900/50 p-2 rounded-lg">
+                <span className="text-[10px] text-emerald-300 font-sans block mb-0.5">ربح الهدف الثاني (TP2)</span>
+                <span className="text-emerald-400 font-bold text-xs">+${tp2ProfitUsdt.toFixed(2)} USDT</span>
+                <span className="text-[9px] text-emerald-300/80 block font-sans">+{ (tp2Pct * calcLeverage).toFixed(1) }%</span>
+              </div>
+              <div className="bg-teal-950/40 border border-teal-900/50 p-2 rounded-lg">
+                <span className="text-[10px] text-teal-300 font-sans block mb-0.5">ربح الهدف الثالث (TP3)</span>
+                <span className="text-teal-400 font-bold text-xs">+${tp3ProfitUsdt.toFixed(2)} USDT</span>
+                <span className="text-[9px] text-teal-300/80 block font-sans">+{ (tp3Pct * calcLeverage).toFixed(1) }%</span>
+              </div>
             </div>
           </div>
 

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   Bot,
   Play,
@@ -18,8 +18,13 @@ import {
   RefreshCw,
   Clock,
   Compass,
+  BellRing,
+  ArrowUpDown,
+  Award,
+  DollarSign,
 } from 'lucide-react';
 import type { TradingAgent, BotRiskParameters, BotAdaptationEvent } from '../lib/firestoreService.ts';
+import { pushNotificationService } from '../lib/pushNotificationService.ts';
 
 interface AgentManagerProps {
   agents: TradingAgent[];
@@ -45,6 +50,93 @@ export const AgentManager: React.FC<AgentManagerProps> = ({
   const [selectedHistoryAgent, setSelectedHistoryAgent] = useState<TradingAgent | null>(null);
   const [editingRiskAgent, setEditingRiskAgent] = useState<TradingAgent | null>(null);
 
+  // Sorting state for auto-ordering bots by Win Rate or PnL
+  const [sortBy, setSortBy] = useState<'default' | 'winRate' | 'pnl' | 'trades'>('default');
+  const [sortOrder, setSortOrder] = useState<'desc' | 'asc'>('desc');
+
+  const sortedAgents = useMemo(() => {
+    const list = [...agents];
+    if (sortBy === 'winRate') {
+      return list.sort((a, b) => {
+        const diff = (b.winRate ?? 0) - (a.winRate ?? 0);
+        return sortOrder === 'desc' ? diff : -diff;
+      });
+    }
+    if (sortBy === 'pnl') {
+      return list.sort((a, b) => {
+        const diff = (b.pnl ?? 0) - (a.pnl ?? 0);
+        return sortOrder === 'desc' ? diff : -diff;
+      });
+    }
+    if (sortBy === 'trades') {
+      return list.sort((a, b) => {
+        const diff = (b.totalTrades ?? 0) - (a.totalTrades ?? 0);
+        return sortOrder === 'desc' ? diff : -diff;
+      });
+    }
+    return list;
+  }, [agents, sortBy, sortOrder]);
+
+  // Presets for quick bot creation
+  const PRESET_STRATEGIES = [
+    {
+      label: 'قناص كتل السيولة (SMC) - BTC',
+      name: 'قناص سيولة البيتكوين الذكي (SMC Liquidity)',
+      pair: 'BTC-USDT',
+      strategy: 'Smart Money Concepts (SMC & Order Blocks)',
+      timeframe: '15m',
+      riskPercentage: 2,
+      leverage: 10,
+      stopLossPercent: 1.8,
+      takeProfitPercent: 4.8,
+      minConfidenceScore: 82,
+      executionMode: 'AUTO_BINGX' as const,
+      patternTriggers: ['BOS_CHOCH', 'ORDER_BLOCKS', 'LIQUIDITY_SWEEP'],
+    },
+    {
+      label: 'صائد الذهب المؤسسي (Gold SMC) - XAU (رافعة 35x معزول)',
+      name: 'صياد سبائك الذهب الفوري (Gold SMC Hunter)',
+      pair: 'XAU-USDT',
+      strategy: 'Gold SMC & Troy Ounce Liquidity Hunt',
+      timeframe: '15m',
+      riskPercentage: 2,
+      leverage: 35,
+      stopLossPercent: 1.5,
+      takeProfitPercent: 4.2,
+      minConfidenceScore: 85,
+      executionMode: 'AUTO_BINGX' as const,
+      patternTriggers: ['ORDER_BLOCKS', 'LIQUIDITY_SWEEP', 'PIN_BAR'],
+    },
+    {
+      label: 'مقتنص الزخم (EMA/MACD) - ETH',
+      name: 'مقتنص الزخم الفوري (Trend Momentum)',
+      pair: 'ETH-USDT',
+      strategy: 'Trend Following & Triple EMA Alignment',
+      timeframe: '5m',
+      riskPercentage: 1.5,
+      leverage: 15,
+      stopLossPercent: 2.0,
+      takeProfitPercent: 5.0,
+      minConfidenceScore: 78,
+      executionMode: 'AUTO_BINGX' as const,
+      patternTriggers: ['EMA_CROSS', 'MACD_DIVERGENCE'],
+    },
+    {
+      label: 'مضارب السكالبينج (RSI Bounce) - SOL',
+      name: 'مضارب السكالبينج السريع (RSI Scalper)',
+      pair: 'SOL-USDT',
+      strategy: 'RSI Mean Reversion & Exhaustion',
+      timeframe: '5m',
+      riskPercentage: 2,
+      leverage: 20,
+      stopLossPercent: 2.5,
+      takeProfitPercent: 6.0,
+      minConfidenceScore: 80,
+      executionMode: 'AUTO_BINGX' as const,
+      patternTriggers: ['RSI_EXTREMES', 'BOLLINGER_BOUNCE'],
+    },
+  ];
+
   // Form State for Creation
   const [name, setName] = useState('');
   const [pair, setPair] = useState('BTC-USDT');
@@ -56,7 +148,28 @@ export const AgentManager: React.FC<AgentManagerProps> = ({
   const [stopLossPercent, setStopLossPercent] = useState(2.0);
   const [takeProfitPercent, setTakeProfitPercent] = useState(4.5);
   const [trailingStop, setTrailingStop] = useState(true);
+  const [minConfidenceScore, setMinConfidenceScore] = useState(80);
+  const [executionMode, setExecutionMode] = useState<'AUTO_BINGX' | 'LIVE_FUTURES' | 'DEMO_VST'>('AUTO_BINGX');
+  const [patternTriggers, setPatternTriggers] = useState<string[]>([
+    'BOS_CHOCH',
+    'ORDER_BLOCKS',
+    'EMA_CROSS',
+  ]);
   const [model, setModel] = useState('gemini-3.1-pro-preview');
+
+  const applyPreset = (preset: typeof PRESET_STRATEGIES[0]) => {
+    setName(preset.name);
+    setPair(preset.pair);
+    setStrategy(preset.strategy);
+    setTimeframe(preset.timeframe);
+    setRiskPercentage(preset.riskPercentage);
+    setLeverage(preset.leverage);
+    setStopLossPercent(preset.stopLossPercent);
+    setTakeProfitPercent(preset.takeProfitPercent);
+    setMinConfidenceScore(preset.minConfidenceScore);
+    setExecutionMode(preset.executionMode);
+    setPatternTriggers(preset.patternTriggers);
+  };
 
   // Edit Risk Parameters State
   const [editRiskParams, setEditRiskParams] = useState<BotRiskParameters>({
@@ -82,6 +195,9 @@ export const AgentManager: React.FC<AgentManagerProps> = ({
       riskPercentage,
       status: 'active',
       model,
+      minConfidenceScore,
+      executionMode,
+      patternTriggers,
       riskParameters: {
         riskPercentage,
         maxDrawdownPercent,
@@ -202,9 +318,113 @@ export const AgentManager: React.FC<AgentManagerProps> = ({
         </button>
       </div>
 
+      {/* Auto Sorting & Filter Toolbar */}
+      <div className="flex flex-wrap items-center justify-between gap-2.5 bg-slate-950/90 border border-slate-800 rounded-xl p-2.5 text-xs shadow-inner">
+        <div className="flex items-center gap-2">
+          <ArrowUpDown className="w-4 h-4 text-cyan-400" />
+          <span className="text-slate-300 font-bold">الترتيب التلقائي للوكلاء:</span>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Sort by Win Rate */}
+          <button
+            type="button"
+            id="sort-agents-winrate-btn"
+            onClick={() => {
+              if (sortBy === 'winRate') {
+                setSortOrder(prev => (prev === 'desc' ? 'asc' : 'desc'));
+              } else {
+                setSortBy('winRate');
+                setSortOrder('desc');
+              }
+            }}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold text-xs transition-all cursor-pointer ${
+              sortBy === 'winRate'
+                ? 'bg-gradient-to-r from-emerald-600 to-teal-600 text-white shadow-md shadow-emerald-950/40 ring-1 ring-emerald-400'
+                : 'bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800'
+            }`}
+            title="ترتيب الوكلاء تلقائياً بناءً على نسبة الفوز (Win Rate)"
+          >
+            <Award className="w-3.5 h-3.5 text-amber-300" />
+            <span>نسبة الفوز (Win Rate)</span>
+            {sortBy === 'winRate' && (
+              <span className="text-[10px] font-mono font-black">{sortOrder === 'desc' ? '▼ (الأعلى)' : '▲ (الأقل)'}</span>
+            )}
+          </button>
+
+          {/* Sort by PnL */}
+          <button
+            type="button"
+            id="sort-agents-pnl-btn"
+            onClick={() => {
+              if (sortBy === 'pnl') {
+                setSortOrder(prev => (prev === 'desc' ? 'asc' : 'desc'));
+              } else {
+                setSortBy('pnl');
+                setSortOrder('desc');
+              }
+            }}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold text-xs transition-all cursor-pointer ${
+              sortBy === 'pnl'
+                ? 'bg-gradient-to-r from-amber-500 to-yellow-500 text-slate-950 shadow-md shadow-amber-950/40 ring-1 ring-amber-400'
+                : 'bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800'
+            }`}
+            title="ترتيب الوكلاء تلقائياً بناءً على إجمالي الأرباح المحققة (PnL)"
+          >
+            <DollarSign className="w-3.5 h-3.5 text-emerald-950" />
+            <span>إجمالي الأرباح (PnL)</span>
+            {sortBy === 'pnl' && (
+              <span className="text-[10px] font-mono font-black">{sortOrder === 'desc' ? '▼ (الأعلى)' : '▲ (الأقل)'}</span>
+            )}
+          </button>
+
+          {/* Sort by Trades */}
+          <button
+            type="button"
+            id="sort-agents-trades-btn"
+            onClick={() => {
+              if (sortBy === 'trades') {
+                setSortOrder(prev => (prev === 'desc' ? 'asc' : 'desc'));
+              } else {
+                setSortBy('trades');
+                setSortOrder('desc');
+              }
+            }}
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg font-bold text-xs transition-all cursor-pointer ${
+              sortBy === 'trades'
+                ? 'bg-cyan-600 text-white shadow-md ring-1 ring-cyan-400'
+                : 'bg-slate-900 hover:bg-slate-800 text-slate-400 border border-slate-800'
+            }`}
+            title="ترتيب الوكلاء تلقائياً حسب عدد الصفقات"
+          >
+            <TrendingUp className="w-3.5 h-3.5" />
+            <span>عدد الصفقات</span>
+            {sortBy === 'trades' && (
+              <span className="text-[10px] font-mono">{sortOrder === 'desc' ? '▼' : '▲'}</span>
+            )}
+          </button>
+
+          {/* Reset button */}
+          {sortBy !== 'default' && (
+            <button
+              type="button"
+              onClick={() => {
+                setSortBy('default');
+                setSortOrder('desc');
+              }}
+              className="text-slate-400 hover:text-white text-[11px] px-2 py-1 rounded bg-slate-900 border border-slate-800 hover:border-slate-700 transition-colors cursor-pointer flex items-center gap-1"
+              title="استعادة الترتيب الافتراضي"
+            >
+              <RefreshCw className="w-3 h-3" />
+              <span>إلغاء الترتيب</span>
+            </button>
+          )}
+        </div>
+      </div>
+
       {/* Agents Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
-        {agents.map(agent => {
+        {sortedAgents.map(agent => {
           const isCycleActive = activeCycleAgentId === agent.id;
           const statusColors = {
             active: 'bg-emerald-950 text-emerald-400 border-emerald-800',
@@ -243,10 +463,80 @@ export const AgentManager: React.FC<AgentManagerProps> = ({
                       <span>•</span>
                       <span className="text-slate-300 truncate max-w-[170px]">{agent.strategy}</span>
                     </p>
+
+                    <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono border ${
+                        agent.executionMode === 'LIVE_FUTURES'
+                          ? 'bg-rose-950/70 border-rose-800 text-rose-300'
+                          : agent.executionMode === 'DEMO_VST'
+                          ? 'bg-amber-950/70 border-amber-800 text-amber-300'
+                          : 'bg-cyan-950/70 border-cyan-800 text-cyan-300'
+                      }`}>
+                        {agent.executionMode === 'LIVE_FUTURES' ? '🔴 BingX Live' : agent.executionMode === 'DEMO_VST' ? '🟡 Demo VST' : '⚡ BingX Auto'}
+                      </span>
+                      <span className="text-[10px] bg-slate-900 border border-slate-700 text-slate-300 px-1.5 py-0.5 rounded">
+                        الرافعة: {agent.riskParameters?.leverage || 10}x
+                      </span>
+                      <span className="text-[10px] bg-slate-900 border border-slate-700 text-slate-300 px-1.5 py-0.5 rounded">
+                        مخاطرة: {agent.riskParameters?.riskPercentage || agent.riskPercentage || 2}%
+                      </span>
+                      {agent.minConfidenceScore ? (
+                        <span className="text-[10px] bg-cyan-950/60 border border-cyan-800 text-cyan-400 px-1.5 py-0.5 rounded">
+                          ثقة AI: {agent.minConfidenceScore}%+
+                        </span>
+                      ) : null}
+                    </div>
+
+                    {agent.patternTriggers && agent.patternTriggers.length > 0 && (
+                      <div className="flex flex-wrap gap-1 mt-1 text-[9px] text-slate-400">
+                        {agent.patternTriggers.slice(0, 3).map((trig, i) => (
+                          <span key={i} className="bg-slate-950/90 border border-slate-800 px-1.5 py-0.5 rounded text-cyan-400/90">
+                            #{trig}
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
 
                 <div className="flex items-center gap-1">
+                  <button
+                    id={`test-volatility-alert-btn-${agent.id}`}
+                    type="button"
+                    onClick={async () => {
+                      const curLev = agent.riskParameters?.leverage || 10;
+                      const newLev = curLev > 10 ? 10 : curLev === 10 ? 5 : 15;
+                      if (onUpdateAgent) {
+                        await onUpdateAgent(agent.id, {
+                          riskParameters: {
+                            ...(agent.riskParameters || {
+                              riskPercentage: 2,
+                              maxDrawdownPercent: 10,
+                              leverage: 10,
+                              stopLossPercent: 2,
+                              takeProfitPercent: 4.5,
+                              trailingStop: true,
+                              maxOpenTrades: 2,
+                            }),
+                            leverage: newLev,
+                          },
+                        });
+                      }
+                      pushNotificationService.sendLeverageAdaptationNotification({
+                        agentName: agent.name,
+                        pair: agent.pair,
+                        oldLeverage: curLev,
+                        newLeverage: newLev,
+                        reason: 'استجابة لتقلبات السوق المفاجئة وتغير السيولة',
+                        volatilityLevel: 'HIGH',
+                      });
+                    }}
+                    title="محاكاة تعديل الرافعة استجابة لتقلب السوق وتشغيل التنبيه والملخص الصوتي"
+                    className="text-slate-400 hover:text-indigo-400 p-1 rounded hover:bg-slate-800 transition-colors cursor-pointer"
+                  >
+                    <BellRing className="w-4 h-4 text-indigo-400" />
+                  </button>
+
                   <button
                     id={`risk-btn-${agent.id}`}
                     onClick={() => openRiskModal(agent)}
@@ -398,6 +688,26 @@ export const AgentManager: React.FC<AgentManagerProps> = ({
             </div>
 
             <form onSubmit={handleCreateSubmit} className="flex flex-col gap-3.5 text-xs">
+              {/* Quick Strategy Presets */}
+              <div className="flex flex-col gap-1.5 bg-slate-950/80 p-2.5 rounded-lg border border-slate-800">
+                <span className="text-[11px] font-semibold text-slate-300 flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>قوالب استراتيجيات ذكية جاهزة (تعبئة فورية بنقرة واحدة):</span>
+                </span>
+                <div className="flex flex-wrap gap-1.5">
+                  {PRESET_STRATEGIES.map((preset, idx) => (
+                    <button
+                      key={idx}
+                      type="button"
+                      onClick={() => applyPreset(preset)}
+                      className="text-[11px] px-2.5 py-1 bg-slate-900 hover:bg-cyan-950/80 border border-slate-700 hover:border-cyan-600 rounded-md text-slate-300 hover:text-cyan-300 transition-colors cursor-pointer"
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               <div>
                 <label className="block text-slate-300 font-medium mb-1">اسم الوكيل</label>
                 <input
@@ -426,6 +736,7 @@ export const AgentManager: React.FC<AgentManagerProps> = ({
                     <option value="XRP-USDT">XRP-USDT</option>
                     <option value="DOGE-USDT">DOGE-USDT</option>
                     <option value="BNB-USDT">BNB-USDT</option>
+                    <option value="XAU-USDT">XAU-USDT (الذهب العالمي / Gold Troy Ounce)</option>
                   </select>
                 </div>
 
@@ -460,6 +771,7 @@ export const AgentManager: React.FC<AgentManagerProps> = ({
                   <option value="RSI Mean Reversion & Exhaustion">4. تشبع القوة النسبية والارتداد السعري (RSI Mean Reversion)</option>
                   <option value="Bollinger Bands Squeeze & Volatility Breakout">5. ضغط بولينجر باند واقتناص الانفجار السعري (BB Breakout)</option>
                   <option value="Adaptive Multi-Confluence Meta-Bot">6. الوكيل الذاتي الهجين متعدد المؤشرات (Adaptive Confluence)</option>
+                  <option value="Gold SMC & Troy Ounce Liquidity Hunt">7. صائد سيولة الذهب وكتل الأوامر (Gold SMC & Liquidity Hunt)</option>
                 </select>
               </div>
 
@@ -554,6 +866,98 @@ export const AgentManager: React.FC<AgentManagerProps> = ({
                 </div>
               </div>
 
+              {/* BingX Execution Routing Mode */}
+              <div className="bg-slate-950/70 p-3 rounded-lg border border-slate-800 flex flex-col gap-2">
+                <span className="text-cyan-400 font-bold flex items-center gap-1.5">
+                  <Zap className="w-4 h-4" />
+                  <span>طريقة التنفيذ والتوجيه لمنصة BingX</span>
+                </span>
+                <div className="grid grid-cols-3 gap-2 text-[11px]">
+                  <button
+                    type="button"
+                    onClick={() => setExecutionMode('AUTO_BINGX')}
+                    className={`p-2 rounded-lg border text-center transition-all cursor-pointer ${
+                      executionMode === 'AUTO_BINGX'
+                        ? 'bg-cyan-950/70 border-cyan-500 text-cyan-300 font-bold shadow-sm'
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:bg-slate-850'
+                    }`}
+                  >
+                    توجيه ذكي (BingX Auto)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setExecutionMode('LIVE_FUTURES')}
+                    className={`p-2 rounded-lg border text-center transition-all cursor-pointer ${
+                      executionMode === 'LIVE_FUTURES'
+                        ? 'bg-emerald-950/70 border-emerald-500 text-emerald-300 font-bold shadow-sm'
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:bg-slate-850'
+                    }`}
+                  >
+                    عقود حقيقية (Live Futures)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setExecutionMode('DEMO_VST')}
+                    className={`p-2 rounded-lg border text-center transition-all cursor-pointer ${
+                      executionMode === 'DEMO_VST'
+                        ? 'bg-amber-950/70 border-amber-500 text-amber-300 font-bold shadow-sm'
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:bg-slate-850'
+                    }`}
+                  >
+                    تجريبي آمن (Demo VST)
+                  </button>
+                </div>
+              </div>
+
+              {/* Candlestick & Market Pattern Triggers */}
+              <div className="bg-slate-950/70 p-3 rounded-lg border border-slate-800 flex flex-col gap-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-cyan-400 font-bold flex items-center gap-1.5">
+                    <Sliders className="w-4 h-4" />
+                    <span>أنماط الشموع وهيكل السوق المشروطة للتنفيذ</span>
+                  </span>
+                  <span className="text-slate-400 text-[10px]">الحد الأدنى لثقة AI: {minConfidenceScore}%</span>
+                </div>
+                <input
+                  type="range"
+                  min="70"
+                  max="95"
+                  step="1"
+                  value={minConfidenceScore}
+                  onChange={e => setMinConfidenceScore(parseInt(e.target.value) || 80)}
+                  className="w-full accent-cyan-500 cursor-pointer"
+                />
+                <div className="grid grid-cols-2 gap-2 text-[11px] text-slate-300 pt-1">
+                  {[
+                    { id: 'BOS_CHOCH', label: 'كسر هيكل وتغير الشخصية (BOS / CHoCH)' },
+                    { id: 'ORDER_BLOCKS', label: 'مناطق صانع السوق (Order Blocks & FVG)' },
+                    { id: 'LIQUIDITY_SWEEP', label: 'سحب واصطياد السيولة (Liquidity Sweeps)' },
+                    { id: 'EMA_CROSS', label: 'تقاطع المتوسطات المتحركة (Golden/Death Cross)' },
+                    { id: 'MACD_DIVERGENCE', label: 'انفراجات الماكد السريعة (MACD Divergence)' },
+                    { id: 'PIN_BAR', label: 'الشموع الانعكاسية (Pin Bar & Engulfing)' },
+                  ].map(p => {
+                    const isChecked = patternTriggers.includes(p.id);
+                    return (
+                      <label key={p.id} className="flex items-center gap-1.5 cursor-pointer hover:text-white">
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={e => {
+                            if (e.target.checked) {
+                              setPatternTriggers([...patternTriggers, p.id]);
+                            } else {
+                              setPatternTriggers(patternTriggers.filter(x => x !== p.id));
+                            }
+                          }}
+                          className="rounded accent-cyan-500"
+                        />
+                        <span className="truncate">{p.label}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+
               <div>
                 <label className="block text-slate-300 font-medium mb-1">محرك الذكاء الاصطناعي</label>
                 <select
@@ -562,8 +966,10 @@ export const AgentManager: React.FC<AgentManagerProps> = ({
                   onChange={e => setModel(e.target.value)}
                   className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white focus:outline-hidden focus:border-cyan-500"
                 >
+                  <option value="gemini-2.5-flash">Gemini 2.5 Flash (استقرار فائق وأداء فوري خالي من التأخير)</option>
+                  <option value="gemini-flash-latest">Gemini Flash Latest (الجيل الأحدث فائق التحديث)</option>
                   <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro (تفكير عميق ودقة استنتاج عالية)</option>
-                  <option value="gemini-3.5-flash">Gemini 3.5 Flash (سرعة تنفيذ وتحديث فوري)</option>
+                  <option value="gemini-3.8-flash">Gemini 3.8 Flash (معالجة متقدمة)</option>
                 </select>
               </div>
 
@@ -738,7 +1144,7 @@ export const AgentManager: React.FC<AgentManagerProps> = ({
                     <div className="flex items-center justify-between text-slate-400 text-[10px]">
                       <span className="flex items-center gap-1 font-mono">
                         <Clock className="w-3 h-3 text-cyan-400" />
-                        {new Date(item.timestamp).toLocaleString()}
+                        {item.timestamp ? new Date(item.timestamp).toLocaleString() : 'الآن'}
                       </span>
                       <span className="bg-purple-950 text-purple-300 px-2 py-0.5 rounded border border-purple-800">
                         {item.marketRegime}

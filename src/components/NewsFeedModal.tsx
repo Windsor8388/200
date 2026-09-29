@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Globe, Search, ExternalLink, RefreshCw, Sparkles, Newspaper } from 'lucide-react';
+import { resilientFetch } from '../lib/resilientFetch.ts';
 
 interface NewsFeedModalProps {
   isOpen: boolean;
@@ -15,18 +16,20 @@ export const NewsFeedModal: React.FC<NewsFeedModalProps> = ({ isOpen, onClose })
   const fetchNews = async () => {
     setLoading(true);
     try {
-      const res = await fetch('/api/ai/search-news', {
+      const res = await resilientFetch('/api/ai/search-news', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query }),
       });
-      const data = await res.json();
-      if (data.success) {
-        setNewsContent(data.news);
-        setSources(data.groundingChunks || []);
+      if (res.ok) {
+        const data = await res.json().catch(() => null);
+        if (data?.success) {
+          setNewsContent(data.news);
+          setSources(data.groundingChunks || []);
+        }
       }
-    } catch (e) {
-      console.error('Failed to search news:', e);
+    } catch {
+      // Safe fallback
     } finally {
       setLoading(false);
     }

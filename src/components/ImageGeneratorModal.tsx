@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Image as ImageIcon, Sparkles, Download, RefreshCw, ZoomIn } from 'lucide-react';
+import { resilientFetch } from '../lib/resilientFetch.ts';
 
 interface ImageGeneratorModalProps {
   isOpen: boolean;
@@ -25,7 +26,7 @@ export const ImageGeneratorModal: React.FC<ImageGeneratorModalProps> = ({
     setIsGenerating(true);
     setErrorNotice(null);
     try {
-      const res = await fetch('/api/ai/generate-chart-image', {
+      const res = await resilientFetch('/api/ai/generate-chart-image', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -34,14 +35,19 @@ export const ImageGeneratorModal: React.FC<ImageGeneratorModalProps> = ({
           aspectRatio,
         }),
       });
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        throw new Error(data.error || 'فشل توليد صورة الشارت');
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        setErrorNotice(errJson.error || 'تعذر توليد صورة الشارت حالياً');
+        return;
+      }
+      const data = await res.json().catch(() => null);
+      if (!data?.success || !data?.imageUrl) {
+        setErrorNotice(data?.error || 'تعذر إنشاء الصورة، يرجى المحاولة لاحقاً');
+        return;
       }
       setGeneratedImg(data.imageUrl);
     } catch (err: any) {
-      console.error(err);
-      setErrorNotice(err.message || 'حدث خطأ أثناء التوليد');
+      setErrorNotice(err?.message || 'حدث خطأ أثناء التوليد');
     } finally {
       setIsGenerating(false);
     }
